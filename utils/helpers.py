@@ -1,0 +1,204 @@
+import csv
+import io
+import datetime
+from data.config import Config
+
+
+def parse_csv(csv_content):
+    """
+    Разбирает содержимое CSV-файла с информацией о проекте
+
+    Args:
+        csv_content (str): Содержимое CSV-файла
+
+    Returns:
+        list: Список словарей с данными о задачах
+    """
+    tasks = []
+
+    csv_file = io.StringIO(csv_content)
+    reader = csv.DictReader(csv_file)
+
+    # Словарь для отслеживания групповых задач
+    group_tasks = {}
+
+    for row in reader:
+        task = {
+            "name": row.get("Задача", "").strip(),
+            "duration": int(row.get("Длительность", 0)),
+            "is_group": row.get("Тип", "").lower().strip() == "групповая",
+            "position": row.get("Должность", "").strip(),
+        }
+
+        # Обрабатываем предшественников
+        predecessors_str = row.get("Предшественники", "").strip()
+        if predecessors_str:
+            task["predecessors"] = [pred.strip() for pred in predecessors_str.split(',')]
+        else:
+            task["predecessors"] = []
+
+        # Обрабатываем групповые задачи
+        parent_task = row.get("Родительская задача", "").strip()
+        if parent_task:
+            # Это подзадача
+            if parent_task not in group_tasks:
+                # Создаем родительскую задачу, если ее еще нет
+                group_task = {
+                    "name": parent_task,
+                    "duration": 0,  # Будет рассчитано позже
+                    "is_group": True,
+                    "predecessors": [],
+                    "subtasks": []
+                }
+                group_tasks[parent_task] = group_task
+                tasks.append(group_task)
+
+            # Добавляем подзадачу
+            subtask = {
+                "name": task["name"],
+                "duration": task["duration"],
+                "position": task["position"],
+                "parallel": row.get("Параллельная", "").lower().strip() in ("да", "yes", "true", "1")
+            }
+
+            group_tasks[parent_task]["subtasks"].append(subtask)
+
+            # Обновляем длительность групповой задачи
+            if subtask["parallel"]:
+                # При параллельном выполнении берем максимальную длительность
+                group_tasks[parent_task]["duration"] = max(
+                    group_tasks[parent_task]["duration"],
+                    subtask["duration"]
+                )
+            else:
+                # При последовательном выполнении суммируем длительности
+                group_tasks[parent_task]["duration"] += subtask["duration"]
+        else:
+            # Это обычная задача или новая групповая задача
+            if task["is_group"]:
+                task["subtasks"] = []
+                group_tasks[task["name"]] = task
+
+            tasks.append(task)
+
+    return tasks
+
+
+def format_date(date_str):
+    """
+    Форматирует дату для отображения
+
+    Args:
+        date_str (str): Дата в формате YYYY-MM-DD
+
+    Returns:
+        str: Отформатированная дата (DD.MM.YYYY)
+    """
+    if not date_str:
+        return "Не указана"
+
+    try:
+        date = datetime.datetime.strptime(date_str, '%Y-%m-%d')
+        return date.strftime('%d.%m.%Y')
+    except ValueError:
+        return date_str
+
+
+def is_authorized(user_id):
+    """
+    Проверяет, есть ли у пользователя доступ к боту
+
+    Args:
+        user_id (int): Идентификатор пользователя Telegram
+
+    Returns:
+        bool: True, если пользователь имеет доступ, иначе False
+    """
+    return user_id in Config.ALLOWED_USER_IDS
+
+
+def add_days_to_date(date_str, days):
+    """
+    Добавляет указанное количество дней к дате
+
+    Args:
+        date_str (str): Дата в формате YYYY-MM-DD
+        days (int): Количество дней для добавления
+
+    Returns:
+        str: Новая дата в формате YYYY-MM-DD
+    """
+    date = datetime.datetime.strptime(date_str, '%Y-%m-%d')
+    new_date = date + datetime.timedelta(days=days)
+    return new_date.strftime('%Y-%m-%d')
+
+
+def calculate_end_date(start_date, duration):
+    """
+    Вычисляет дату окончания задачи
+
+    Args:
+        start_date (str): Дата начала в формате YYYY-MM-DD
+        duration (int): Длительность в днях
+
+    Returns:
+        str: Дата окончания в формате YYYY-MM-DD
+    """
+    return add_days_to_date(start_date, duration)
+
+
+def get_working_days(start_date, end_date, days_off):
+    """
+    Вычисляет количество рабочих дней в указанном интервале, исключая выходные дни
+
+    Args:
+        start_date (str): Дата начала в формате YYYY-MM-DD
+        end_date (str): Дата окончания в формате YYYY-MM-DD
+        days_off (list): Список дней недели, которые являются выходными (1 - понедельник, 7 - воскресенье)
+
+    Returns:
+        int: Количество рабочих дней
+    """
+    start = datetime.datetime.strptime(start_date, '%Y-%m-%d')
+    end = datetime.datetime.strptime(end_date, '%Y-%m-%d')
+
+    # Преобразуем дни недели из 1-7 в 0-6 (формат Python)
+    python_days_off = [(day - 1) % 7 for day in days_off]
+
+    working_days = 0
+    current = start
+
+    while current <= end:
+        if current.weekday() not in python_days_off:
+            working_days += 1
+        current += datetime.timedelta(days=1)
+
+    return working_days
+
+
+def adjust_date_for_days_off(date_str, duration, days_off):
+    """
+    Корректирует дату окончания задачи с учетом выходных дней
+
+    Args:
+        date_str (str): Дата начала в формате YYYY-MM-DD
+        duration (int): Длительность в рабочих днях
+        days_off (list): Список дней недели, которые являются выходными (1 - понедельник, 7 - воскресенье)
+
+    Returns:
+        str: Скорректированная дата окончания в формате YYYY-MM-DD
+    """
+    start = datetime.datetime.strptime(date_str, '%Y-%m-%d')
+
+    # Преобразуем дни недели из 1-7 в 0-6 (формат Python)
+    python_days_off = [(day - 1) % 7 for day in days_off]
+
+    working_days = 0
+    current = start
+
+    while working_days < duration:
+        current += datetime.timedelta(days=1)
+        if current.weekday() not in python_days_off:
+            working_days += 1
+
+    return current.strftime('%Y-%m-%d')

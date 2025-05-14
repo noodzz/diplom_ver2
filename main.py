@@ -3,6 +3,7 @@ import logging
 import asyncio
 import json
 import tempfile
+import datetime
 
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.filters import Command, CommandStart
@@ -23,7 +24,7 @@ from services.jira_exporter import JiraExporter
 from services.network_model import NetworkModel
 from services.gantt_chart import GanttChart
 from services.workload_chart import WorkloadChart
-from utils.helpers import parse_csv, format_date, is_authorized
+from utils.helpers import parse_csv, format_date, is_authorized, is_admin
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -68,6 +69,8 @@ class TaskState(StatesGroup):
     waiting_for_employee_type = State()
     waiting_for_employee = State()
 
+class AdminState(StatesGroup):
+    waiting_for_user_id = State()
 
 # -----------------------------------------------------------------------------
 # Обработчики команд
@@ -75,34 +78,311 @@ class TaskState(StatesGroup):
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    if not is_authorized(message.from_user.id):
-        await message.answer("Извините, у вас нет доступа к этому боту.")
+    if not is_authorized(message.from_user.id, db_manager):
+        user_id = message.from_user.id
+        await message.answer(
+            f"Извините, у вас нет доступа к этому боту.\n"
+            f"Ваш ID: {user_id}\n"
+            f"Обратитесь к администратору для получения доступа."
+        )
         return
 
-    await message.answer(
-        "Добро пожаловать в бот для управления проектами!\n"
-        "Используйте /help для просмотра доступных команд."
+    welcome_text = (
+        "👋 Добро пожаловать в бот для управления проектами!\n\n"
+        "С моей помощью вы можете:\n"
+        "• Создавать проекты\n"
+        "• Рассчитывать оптимальный календарный план\n"
+        "• Распределять задачи по сотрудникам\n"
+        "• Экспортировать проекты в Jira\n\n"
+        "Используйте /create_project, чтобы создать новый проект\n"
+        "Или /list_projects, чтобы увидеть список существующих проектов.\n\n"
+        "Дополнительная помощь: /help"
     )
+    await message.answer(welcome_text)
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
-    if not is_authorized(message.from_user.id):
+    help_text = (
+        "Доступные команды:\n"
+        "/create_project - Создать новый проект из шаблона или CSV\n"
+        "/list_projects - Список всех проектов\n"
+        "/help - Показать эту справку\n\n"
+        "/cancel - Отменить текущую операцию\n\n"
+        "Рабочий процесс:\n"
+        "1. Создайте проект с помощью шаблона или CSV-файла\n"
+        "2. Рассчитайте календарный план\n"
+        "3. Просмотрите распределение задач по сотрудникам\n" 
+        "4. При необходимости экспортируйте проект в Jira"
+    )
+    await message.answer(help_text)
+
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    """Отменяет текущую операцию и очищает состояние"""
+    # Проверяем, есть ли активное состояние
+    current_state = await state.get_state()
+
+    if current_state is None:
+        # Если нет активного состояния
+        await message.answer("Нет активной операции для отмены.")
         return
 
+    # Если есть состояние, очищаем его и сообщаем пользователю
+    await state.clear()
+
+    # Выводим разное сообщение в зависимости от того, какое состояние было активно
+    if current_state.startswith('ProjectState:'):
+        await message.answer("✅ Создание проекта отменено. Что бы вы хотели сделать дальше?")
+    elif current_state.startswith('TaskState:'):
+        await message.answer("✅ Добавление задачи отменено.")
+    elif current_state.startswith('AdminState:'):
+        await message.answer("✅ Административная операция отменена.")
+    else:
+        await message.answer("✅ Операция отменена.")
+
+    # Предлагаем основные команды
     help_text = (
         "Доступные команды:\n"
         "/create_project - Создать новый проект\n"
         "/list_projects - Список всех проектов\n"
-        "/view_project - Просмотр деталей проекта\n"
-        "/add_task - Добавить задачу в проект\n"
-        "/assign_employee - Назначить сотрудника на задачу\n"
-        "/calculate_schedule - Рассчитать календарный план\n"
-        "/employee_workload - Распределение задач по сотрудникам\n"
-        "/export_to_jira - Экспортировать проект в Jira\n"
-        "/help - Показать эту справку"
+        "/help - Показать справку"
     )
     await message.answer(help_text)
+
+# -----------------------------------------------------------------------------
+# Административные функции
+# -----------------------------------------------------------------------------
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message):
+    """Показывает административное меню"""
+    if not is_admin(message.from_user.id, db_manager):
+        await message.answer("У вас нет прав администратора.")
+        return
+
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Управление пользователями", callback_data="admin_users")],
+        [InlineKeyboardButton(text="Статистика бота", callback_data="admin_stats")]
+    ])
+
+    await message.answer("Административное меню:", reply_markup=markup)
+
+
+@router.callback_query(F.data == "admin_users")
+async def admin_users(callback: CallbackQuery):
+    """Показывает список пользователей"""
+    if not is_admin(callback.from_user.id, db_manager):
+        await callback.answer("У вас нет прав администратора.")
+        return
+
+    users = db_manager.get_all_users()
+
+    text = "Список пользователей:\n\n"
+
+    # Формируем кнопки для каждого пользователя
+    buttons = []
+    for user in users:
+        status = "✅ Активен" if user['is_active'] else "❌ Заблокирован"
+        role = "🔑 Администратор" if user['is_admin'] else "👤 Пользователь"
+        text += f"ID: {user['id']} - {status}, {role}\n"
+
+        # Добавляем кнопки управления для каждого пользователя (кроме текущего админа)
+        if user['id'] != callback.from_user.id:
+            action = "block" if user['is_active'] else "unblock"
+            label = "🔒 Заблокировать" if user['is_active'] else "🔓 Разблокировать"
+            buttons.append([InlineKeyboardButton(
+                text=f"{label} пользователя {user['id']}",
+                callback_data=f"user_{action}_{user['id']}"
+            )])
+
+    # Добавляем кнопки добавления и возврата
+    buttons.append([InlineKeyboardButton(text="➕ Добавить пользователя", callback_data="add_user")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin")])
+
+    markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await callback.message.edit_text(text, reply_markup=markup)
+
+
+# Обработчик для блокировки/разблокировки пользователя
+@router.callback_query(lambda c: c.data.startswith("user_block_") or c.data.startswith("user_unblock_"))
+async def toggle_user_status(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id, db_manager):
+        await callback.answer("У вас нет прав администратора.")
+        return
+
+    parts = callback.data.split("_")
+    action = parts[1]  # "block" или "unblock"
+    user_id = int(parts[2])
+
+    # Меняем статус пользователя
+    is_active = action == "unblock"  # True если разблокировка, False если блокировка
+    db_manager.update_user(user_id, is_active=is_active)
+
+    action_text = "разблокирован" if is_active else "заблокирован"
+    await callback.answer(f"Пользователь {user_id} {action_text}!")
+
+    # Обновляем список пользователей
+    await admin_users(callback)
+
+
+@router.callback_query(F.data == "add_user")
+async def add_user_start(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id, db_manager):
+        await callback.answer("У вас нет прав администратора.")
+        return
+
+    await callback.message.edit_text(
+        "Введите Telegram ID пользователя, которого хотите добавить:"
+    )
+    await state.set_state(AdminState.waiting_for_user_id)
+
+
+@router.message(AdminState.waiting_for_user_id)
+async def process_new_user_id(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id, db_manager):
+        await message.answer("У вас нет прав администратора.")
+        await state.clear()
+        return
+
+    try:
+        user_id = int(message.text.strip())
+
+        # Проверяем, существует ли уже такой пользователь
+        existing_user = db_manager.get_user(user_id)
+
+        if existing_user:
+            await message.answer(
+                f"Пользователь с ID {user_id} уже существует.\n\n"
+                f"Статус: {'Активен' if existing_user['is_active'] else 'Заблокирован'}\n"
+                f"Роль: {'Администратор' if existing_user['is_admin'] else 'Пользователь'}"
+            )
+        else:
+            # Добавляем нового пользователя
+            db_manager.add_user(user_id, name=f"User_{user_id}", is_admin=0)
+            await message.answer(f"Пользователь с ID {user_id} успешно добавлен!")
+
+        # Возвращаемся к списку пользователей
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Вернуться к списку пользователей", callback_data="admin_users")]
+        ])
+        await message.answer("Что дальше?", reply_markup=markup)
+
+    except ValueError:
+        await message.answer("Ошибка: ID пользователя должен быть числом. Попробуйте еще раз:")
+
+    await state.clear()
+
+
+@router.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: CallbackQuery):
+    """Показывает статистику использования бота"""
+    if not is_admin(callback.from_user.id, db_manager):
+        await callback.answer("У вас нет прав администратора.")
+        return
+
+    try:
+        # Получаем статистику по проектам
+        total_projects = db_manager.execute("SELECT COUNT(*) FROM projects")[0][0]
+        active_projects = db_manager.execute("SELECT COUNT(*) FROM projects WHERE status = 'active'")[0][0]
+
+        # Статистика по задачам
+        total_tasks = db_manager.execute("SELECT COUNT(*) FROM tasks")[0][0]
+        group_tasks = db_manager.execute("SELECT COUNT(*) FROM tasks WHERE is_group = 1")[0][0]
+        subtasks = db_manager.execute("SELECT COUNT(*) FROM tasks WHERE parent_id IS NOT NULL")[0][0]
+
+        # Статистика по пользователям
+        total_users = db_manager.execute("SELECT COUNT(*) FROM users")[0][0]
+        active_users = db_manager.execute("SELECT COUNT(*) FROM users WHERE is_active = 1")[0][0]
+        admin_users = db_manager.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1")[0][0]
+
+        # Распределение проектов по пользователям
+        projects_by_user = db_manager.execute("""
+            SELECT u.id, u.name, COUNT(p.id) as project_count 
+            FROM users u 
+            LEFT JOIN projects p ON u.id = p.user_id 
+            GROUP BY u.id 
+            ORDER BY project_count DESC
+        """)
+
+        # Последняя активность
+        last_project = db_manager.execute(
+            "SELECT name, created_at FROM projects ORDER BY created_at DESC LIMIT 1"
+        )
+
+        # Формируем отчёт
+        stats_text = "📊 **СТАТИСТИКА БОТА**\n\n"
+
+        stats_text += "**Проекты:**\n"
+        stats_text += f"• Всего проектов: {total_projects}\n"
+        stats_text += f"• Активных проектов: {active_projects}\n"
+
+        stats_text += "\n**Задачи:**\n"
+        stats_text += f"• Всего задач: {total_tasks}\n"
+        stats_text += f"• Групповых задач: {group_tasks}\n"
+        stats_text += f"• Подзадач: {subtasks}\n"
+
+        stats_text += "\n**Пользователи:**\n"
+        stats_text += f"• Всего пользователей: {total_users}\n"
+        stats_text += f"• Активных пользователей: {active_users}\n"
+        stats_text += f"• Администраторов: {admin_users}\n"
+
+        stats_text += "\n**Распределение проектов по пользователям:**\n"
+        for user_data in projects_by_user:
+            user_id, user_name, count = user_data
+            stats_text += f"• {user_name or f'User_{user_id}'}: {count} проект(ов)\n"
+
+        if last_project:
+            project_name, created_at = last_project[0]
+            stats_text += f"\n**Последний созданный проект:**\n• {project_name} ({created_at})\n"
+
+        # Добавляем техническую информацию
+        import platform
+        import psutil
+
+        stats_text += "\n**Системная информация:**\n"
+        stats_text += f"• ОС: {platform.system()} {platform.release()}\n"
+        stats_text += f"• Python: {platform.python_version()}\n"
+
+        try:
+            process = psutil.Process(os.getpid())
+            memory_usage = process.memory_info().rss / 1024 / 1024  # в МБ
+            stats_text += f"• Использование памяти: {memory_usage:.2f} МБ\n"
+            stats_text += f"• Время работы бота: {(datetime.datetime.now() - datetime.datetime.fromtimestamp(process.create_time())).total_seconds() / 3600:.2f} ч\n"
+        except:
+            stats_text += "• Данные о системных ресурсах недоступны\n"
+
+        # Кнопка для возврата
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin")]
+        ])
+
+        await callback.message.edit_text(stats_text, reply_markup=markup)
+
+    except Exception as e:
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin")]
+        ])
+        await callback.message.edit_text(
+            f"Ошибка при получении статистики: {str(e)}",
+            reply_markup=markup
+        )
+
+
+@router.callback_query(F.data == "admin")
+async def back_to_admin(callback: CallbackQuery):
+    """Возвращает к административному меню"""
+    if not is_admin(callback.from_user.id, db_manager):
+        await callback.answer("У вас нет прав администратора.")
+        return
+
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Управление пользователями", callback_data="admin_users")],
+        [InlineKeyboardButton(text="📊 Статистика бота", callback_data="admin_stats")]
+    ])
+
+    await callback.message.edit_text("Административное меню:", reply_markup=markup)
 
 
 # -----------------------------------------------------------------------------
@@ -127,16 +407,29 @@ async def process_project_name(message: Message, state: FSMContext):
 
 @router.message(ProjectState.waiting_for_start_date)
 async def process_start_date(message: Message, state: FSMContext):
-    await state.update_data(start_date=message.text)
+    start_date = message.text.strip()
 
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Использовать шаблон", callback_data="use_template")],
-        [InlineKeyboardButton(text="Загрузить из CSV", callback_data="upload_csv")],
-        [InlineKeyboardButton(text="Создать пустой проект", callback_data="empty_project")]
-    ])
+    # Проверяем корректность формата даты
+    try:
+        # Пытаемся распарсить дату
+        datetime.datetime.strptime(start_date, '%Y-%m-%d')
 
-    await message.answer("Как вы хотите создать проект?", reply_markup=markup)
-    await state.set_state(ProjectState.waiting_for_choice)
+        # Если дата корректна, сохраняем её и предлагаем выбор типа проекта
+        await state.update_data(start_date=start_date)
+
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Использовать шаблон", callback_data="use_template")],
+            [InlineKeyboardButton(text="Загрузить из CSV", callback_data="upload_csv")],
+        ])
+
+        await message.answer("Как вы хотите создать проект?", reply_markup=markup)
+        await state.set_state(ProjectState.waiting_for_choice)
+    except ValueError:
+        # Если дата некорректна, сообщаем об ошибке и просим ввести дату снова
+        await message.answer(
+            "❌ Некорректный формат даты. Пожалуйста, введите дату в формате YYYY-MM-DD (например, 2025-05-14)."
+        )
+        # Остаемся в том же состоянии для повторного ввода
 
 
 @router.callback_query(F.data == "use_template", ProjectState.waiting_for_choice)
@@ -159,15 +452,28 @@ async def process_template_selection(callback: CallbackQuery, state: FSMContext)
     user_data = await state.get_data()
 
     try:
+        user_id = callback.from_user.id
+        print(f"Создание проекта из шаблона. Пользователь ID: {user_id}")
         project_id = project_manager.create_from_template(
             user_data['project_name'],
             user_data['start_date'],
-            template_id
+            template_id,
+            user_id=user_id
         )
 
+        # Создаем кнопку для перехода к проекту
+        buttons = [
+            [InlineKeyboardButton(text="📂 Открыть проект", callback_data=f"view_project_{project_id}")],
+            [InlineKeyboardButton(text="📋 Список всех проектов", callback_data="back_to_projects")]
+        ]
+        markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+
         await callback.message.edit_text(
-            f"Проект '{user_data['project_name']}' успешно создан из шаблона!\n"
-            f"ID проекта: {project_id}"
+            f"✅ Проект '{user_data['project_name']}' успешно создан из шаблона!\n\n"
+            f"ID проекта: {project_id}\n\n"
+            f"Все задачи из шаблона добавлены в проект. Теперь вы можете просмотреть и отредактировать задачи, "
+            f"или рассчитать календарный план.",
+            reply_markup=markup
         )
     except Exception as e:
         await callback.message.edit_text(f"Ошибка при создании проекта: {str(e)}")
@@ -186,7 +492,9 @@ async def process_csv_choice(callback: CallbackQuery, state: FSMContext):
         "- Должность - Требуемая должность для выполнения задачи\n"
         "- Предшественники - Список предшествующих задач через запятую\n"
         "- Родительская задача - Для подзадач указывается название родительской задачи\n"
-        "- Параллельная - Для подзадач указывается, могут ли они выполняться параллельно (да/нет)"
+        "- Параллельная - Для подзадач указывается, могут ли они выполняться параллельно (да/нет)\n"
+        "\n"
+        "Шаблон для задачи можете найти по ссылке: https://docs.google.com/spreadsheets/d/1n-He466tyHoeZVLSUfI8A4YuXfCdf9W7yLyrT8v2ZI8/edit?gid=0#gid=0"
     )
     await state.set_state(ProjectState.waiting_for_csv)
 
@@ -206,49 +514,41 @@ async def process_csv_file(message: Message, state: FSMContext):
         csv_content = downloaded_file.read().decode('utf-8')
         project_data = parse_csv(csv_content)
 
+        # Исправляем эту строку: используем message вместо callback
+        user_id = message.from_user.id
+        print(f"Создание проекта из CSV. Пользователь ID: {user_id}")
+
         project_id = project_manager.create_from_csv(
             user_data['project_name'],
             user_data['start_date'],
-            project_data
+            project_data,
+            user_id=user_id
         )
 
+        # Создаем кнопку для перехода к проекту
+        buttons = [
+            [InlineKeyboardButton(text="📂 Открыть проект", callback_data=f"view_project_{project_id}")],
+            [InlineKeyboardButton(text="📋 Список всех проектов", callback_data="back_to_projects")]
+        ]
+        markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+
         await message.answer(
-            f"Проект '{user_data['project_name']}' успешно создан из CSV!\n"
-            f"ID проекта: {project_id}"
+            f"✅ Проект '{user_data['project_name']}' успешно создан из CSV!\n\n"
+            f"ID проекта: {project_id}\n\n"
+            f"Загружено {len(project_data)} задач. Теперь вы можете просмотреть проект и рассчитать календарный план.",
+            reply_markup=markup
         )
     except Exception as e:
         await message.answer(f"Ошибка при обработке CSV: {str(e)}")
 
     await state.clear()
 
-
-@router.callback_query(F.data == "empty_project", ProjectState.waiting_for_choice)
-async def process_empty_project(callback: CallbackQuery, state: FSMContext):
-    user_data = await state.get_data()
-
-    try:
-        project_id = project_manager.create_empty(
-            user_data['project_name'],
-            user_data['start_date']
-        )
-
-        await callback.message.edit_text(
-            f"Пустой проект '{user_data['project_name']}' успешно создан!\n"
-            f"ID проекта: {project_id}\n\n"
-            f"Теперь вы можете добавить задачи с помощью команды /add_task"
-        )
-    except Exception as e:
-        await callback.message.edit_text(f"Ошибка при создании проекта: {str(e)}")
-
-    await state.clear()
-
-
 @router.message(Command("list_projects"))
 async def cmd_list_projects(message: Message):
     if not is_authorized(message.from_user.id):
         return
 
-    projects = project_manager.get_all_projects()
+    projects = project_manager.get_all_projects(user_id=message.from_user.id)
 
     if not projects:
         await message.answer("Проектов пока нет. Создайте новый с помощью команды /create_project")
@@ -341,11 +641,10 @@ async def view_project_callback(callback: CallbackQuery):
 
             # Отправляем кнопки
             buttons = [
-                [InlineKeyboardButton(text="Добавить задачу", callback_data=f"add_task_{project_id}")],
-                [InlineKeyboardButton(text="Рассчитать календарный план", callback_data=f"calculate_{project_id}")],
-                [InlineKeyboardButton(text="Распределение по сотрудникам", callback_data=f"workload_{project_id}")],
-                [InlineKeyboardButton(text="Экспорт в Jira", callback_data=f"export_jira_{project_id}")],
-                [InlineKeyboardButton(text="Назад к списку проектов", callback_data="back_to_projects")]
+                [InlineKeyboardButton(text="📊 Рассчитать календарный план", callback_data=f"calculate_{project_id}")],
+                [InlineKeyboardButton(text="👥 Распределение по сотрудникам", callback_data=f"workload_{project_id}")],
+                [InlineKeyboardButton(text="🔄 Экспорт в Jira", callback_data=f"export_jira_{project_id}")],
+                [InlineKeyboardButton(text="⬅️ Назад к списку проектов", callback_data="back_to_projects")]
             ]
 
             markup = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -360,11 +659,10 @@ async def view_project_callback(callback: CallbackQuery):
         else:
             # Если текст не слишком длинный, отправляем обычным сообщением
             buttons = [
-                [InlineKeyboardButton(text="Добавить задачу", callback_data=f"add_task_{project_id}")],
-                [InlineKeyboardButton(text="Рассчитать календарный план", callback_data=f"calculate_{project_id}")],
-                [InlineKeyboardButton(text="Распределение по сотрудникам", callback_data=f"workload_{project_id}")],
-                [InlineKeyboardButton(text="Экспорт в Jira", callback_data=f"export_jira_{project_id}")],
-                [InlineKeyboardButton(text="Назад к списку проектов", callback_data="back_to_projects")]
+                [InlineKeyboardButton(text="📊 Рассчитать календарный план", callback_data=f"calculate_{project_id}")],
+                [InlineKeyboardButton(text="👥 Распределение по сотрудникам", callback_data=f"workload_{project_id}")],
+                [InlineKeyboardButton(text="🔄 Экспорт в Jira", callback_data=f"export_jira_{project_id}")],
+                [InlineKeyboardButton(text="⬅️ Назад к списку проектов", callback_data="back_to_projects")]
             ]
 
             markup = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -517,10 +815,17 @@ async def calculate_schedule(callback: CallbackQuery):
         # ШАГ 4: Обновляем даты задач в базе данных
         print("Обновляем даты задач...")
         task_manager.update_task_dates(result['task_dates'])
-
+        # Рассчитываем и сохраняем даты подзадач
+        subtask_dates = calculate_subtask_dates(task_manager, result['task_dates'])
+        if subtask_dates:
+            task_manager.update_task_dates(subtask_dates)
+            print(f"Обновлены даты для {len(subtask_dates)} подзадач")
         # ШАГ 5: Генерируем отчет о результатах
         print("Генерируем отчет...")
-        text = f"Календарный план для проекта '{project['name']}'\n\n"
+        text = f"📊 ОТЧЕТ ПО КАЛЕНДАРНОМУ ПЛАНУ\n"
+        text += f"=============================================\n\n"
+        text += f"📋 ОБЩАЯ ИНФОРМАЦИЯ О ПРОЕКТЕ\n"
+        text += f"Название проекта: '{project['name']}'\n"
 
         # Вычисляем фактическую длительность проекта
         from datetime import datetime, timedelta
@@ -537,32 +842,131 @@ async def calculate_schedule(callback: CallbackQuery):
                 text += f"Длительность проекта: {project_duration} дней\n"
                 text += f"Дата начала: {project_start.strftime('%d.%m.%Y')}\n"
                 text += f"Дата завершения: {project_end.strftime('%d.%m.%Y')}\n\n"
+                text += f"Общее количество задач: {len(tasks)}\n\n"
             else:
                 text += f"Длительность проекта: {result['duration']} дней\n\n"
         else:
             text += f"Длительность проекта: {result['duration']} дней\n\n"
 
         # Критический путь
-        text += "Критический путь:\n"
-        for task_id in result['critical_path']:
-            task = task_manager.get_task(task_id)
-            text += f"• {task['name']} ({task['duration']} дн.)\n"
+        text += f"🚩 КРИТИЧЕСКИЙ ПУТЬ\n"
+        text += f"Критический путь — последовательность задач, определяющая длительность проекта.\n"
+        text += f"Задержка любой из этих задач приведет к задержке всего проекта.\n\n"
+        if result['critical_path']:
+            critical_tasks = []
+            total_critical_days = 0
 
-        # Информация о распределении задач
-        if assignments:
-            text += "\nАвтоматически распределены задачи:\n"
-            for task_id, employee_id in assignments.items():
+            for task_id in result['critical_path']:
                 task = task_manager.get_task(task_id)
-                employee = employee_manager.get_employee(employee_id)
+                critical_tasks.append(task)
+                total_critical_days += task['duration'] - 1
 
-                # Определяем, это основная задача или подзадача
-                if task.get('parent_id'):
-                    parent_task = task_manager.get_task(task['parent_id'])
-                    text += f"• {parent_task['name']} → {task['name']} → {employee['name']}\n"
-                else:
-                    text += f"• {task['name']} → {employee['name']}\n"
+                # Форматируем даты для отображения
+                start_date = "?"
+                end_date = "?"
+                if task_id in result['task_dates']:
+                    start_date = format_date(result['task_dates'][task_id]['start'])
+                    end_date = format_date(result['task_dates'][task_id]['end'])
+
+                # Добавляем информацию о задаче
+                text += f"• {task['name']} ({task['duration']} дн.)\n"
+                text += f"  Даты: {start_date} - {end_date}\n"
+
+                # Добавляем информацию о сотруднике, если назначен
+                if task.get('employee_id'):
+                    try:
+                        employee = employee_manager.get_employee(task['employee_id'])
+                        text += f"  Исполнитель: {employee['name']} ({employee['position']})\n"
+                    except:
+                        pass
+                text += "\n"
+            text += f"Длина критического пути: {total_critical_days} дней\n\n"
+        else:
+            text += "Критический путь не определен. Возможные причины:\n"
+            text += "• Недостаточно связей между задачами\n"
+            text += "• Все задачи могут выполняться независимо\n"
+            text += "• Задачи с наибольшей длительностью: "
+
+            # Находим самые длинные задачи
+            sorted_tasks = sorted(tasks, key=lambda t: t.get('duration', 0), reverse=True)
+            long_tasks = [t['name'] for t in sorted_tasks[:3] if t.get('duration', 0) > 0]
+
+            if long_tasks:
+                text += ", ".join(long_tasks) + "\n\n"
+            else:
+                text += "не найдены\n\n"
+
+        # Добавляем информацию о распределении задач по сотрудникам
+        text += f"👥 РАСПРЕДЕЛЕНИЕ ЗАДАЧ\n"
+
+        if assignments:
+            # Группируем по сотрудникам
+            employees_tasks = {}
+            for task_id, employee_id in assignments.items():
+                if employee_id not in employees_tasks:
+                    employees_tasks[employee_id] = []
+
+                task = task_manager.get_task(task_id)
+                if task:
+                    employees_tasks[employee_id].append(task)
+            # Выводим задачи каждого сотрудника
+            for employee_id, tasks_list in employees_tasks.items():
+                try:
+                    employee = employee_manager.get_employee(employee_id)
+                    text += f"{employee['name']} ({employee['position']}):\n"
+
+                    # Сортируем задачи по датам
+                    sorted_tasks = sorted(tasks_list,
+                                          key=lambda t: result['task_dates'].get(t['id'], {}).get('start',
+                                                                                                  '9999-12-31')
+                                          if t['id'] in result['task_dates'] else '9999-12-31')
+
+                    for task in sorted_tasks:
+                        # Определяем даты
+                        start_date = "?"
+                        end_date = "?"
+                        # Проверяем сначала в result['task_dates']
+                        if task['id'] in result['task_dates']:
+                            start_date = format_date(result['task_dates'][task['id']]['start'])
+                            end_date = format_date(result['task_dates'][task['id']]['end'])
+                        else:
+                            # Если нет в результате, пробуем получить из базы данных
+                            task_data = task_manager.get_task(task['id'])
+                            if task_data and task_data.get('start_date') and task_data.get('end_date'):
+                                start_date = format_date(task_data['start_date'])
+                                end_date = format_date(task_data['end_date'])
+
+                        # Выводим информацию о задаче
+                        if task.get('parent_id'):
+                            # Для подзадач показываем родительскую задачу
+                            parent_task = task_manager.get_task(task['parent_id'])
+                            parent_name = parent_task['name'] if parent_task else "Неизвестная задача"
+                            text += f"  • {parent_name} → {task['name']} ({task['duration']} дн.)\n"
+                            text += f"    Даты: {start_date} - {end_date}\n"
+                        else:
+                            text += f"  • {task['name']} ({task['duration']} дн.)\n"
+                            text += f"    Даты: {start_date} - {end_date}\n"
+
+                    # Суммарная нагрузка сотрудника
+                    total_load = sum(task['duration'] for task in tasks_list)
+                    text += f"  Общая нагрузка: {total_load} дней\n\n"
+
+                except Exception as e:
+                    # Если не удалось получить информацию о сотруднике, пропускаем
+                    continue
         else:
             text += "\nНе удалось автоматически распределить задачи."
+
+        # Добавляем рекомендации или замечания
+        text += f"📝 РЕКОМЕНДАЦИИ\n"
+        text += f"1. Обратите особое внимание на задачи критического пути\n"
+        text += f"2. При необходимости перераспределите нагрузку между сотрудниками\n"
+        text += f"3. Для сокращения сроков выполнения проекта оптимизируйте критические задачи\n\n"
+
+        # Добавляем подпись
+        text += f"=============================================\n"
+        text += f"Отчет сгенерирован {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
+        text += f"Система автоматизированного календарного планирования"
 
         # Генерируем диаграмму Ганта
         gantt_image = gantt_chart.generate(project, tasks, result['task_dates'], result['critical_path'])
@@ -603,7 +1007,7 @@ async def calculate_schedule(callback: CallbackQuery):
 
         # Отправляем кнопки для дальнейших действий
         buttons = [
-            [InlineKeyboardButton(text="Просмотреть/изменить распределение", callback_data=f"workload_{project_id}")],
+            [InlineKeyboardButton(text="Просмотреть распределение", callback_data=f"workload_{project_id}")],
             [InlineKeyboardButton(text="Назад к проекту", callback_data=f"view_project_{project_id}")]
         ]
 
@@ -622,6 +1026,69 @@ async def calculate_schedule(callback: CallbackQuery):
     except Exception as e:
         await callback.message.edit_text(f"Ошибка при расчете календарного плана: {str(e)}")
 
+
+def calculate_subtask_dates(task_manager, task_dates):
+    """Рассчитывает даты для подзадач на основе дат родительских задач"""
+    # Получаем все задачи с датами
+    tasks_with_dates = []
+    for task_id, dates in task_dates.items():
+        task = task_manager.get_task(task_id)
+        if task and 'start' in dates and 'end' in dates:
+            task['start_date'] = dates['start']
+            task['end_date'] = dates['end']
+            tasks_with_dates.append(task)
+
+    # Рассчитываем даты для подзадач
+    subtask_dates = {}
+    for task in tasks_with_dates:
+        if task.get('is_group'):
+            subtasks = task_manager.get_subtasks(task['id'])
+
+            if not subtasks:
+                continue
+
+            # Если у родительской задачи есть даты
+            parent_start = datetime.datetime.strptime(task['start_date'], '%Y-%m-%d')
+            parent_end = datetime.datetime.strptime(task['end_date'], '%Y-%m-%d')
+
+            # Группируем подзадачи
+            parallel_subtasks = [st for st in subtasks if st.get('parallel')]
+            sequential_subtasks = [st for st in subtasks if not st.get('parallel')]
+
+            # Обрабатываем параллельные подзадачи
+            for subtask in parallel_subtasks:
+                # Параллельные подзадачи начинаются с родительской
+                subtask_start = parent_start
+                subtask_end = subtask_start + datetime.timedelta(days=subtask['duration'] - 1)
+
+                # Проверяем, не выходит ли за пределы родительской
+                if subtask_end > parent_end:
+                    subtask_end = parent_end
+
+                subtask_dates[subtask['id']] = {
+                    'start': subtask_start.strftime('%Y-%m-%d'),
+                    'end': subtask_end.strftime('%Y-%m-%d')
+                }
+
+            # Обрабатываем последовательные подзадачи
+            current_date = parent_start
+            for subtask in sequential_subtasks:
+                subtask_start = current_date
+                subtask_end = subtask_start + datetime.timedelta(days=subtask['duration'] - 1)
+
+                # Проверяем, не выходит ли за пределы родительской
+                if subtask_end > parent_end:
+                    subtask_end = parent_end
+
+                subtask_dates[subtask['id']] = {
+                    'start': subtask_start.strftime('%Y-%m-%d'),
+                    'end': subtask_end.strftime('%Y-%m-%d')
+                }
+
+                # Следующая подзадача начинается после текущей
+                current_date = subtask_end + datetime.timedelta(days=1)
+
+    return subtask_dates
 
 def adjust_task_duration_for_days_off(task, employee_manager):
     """
@@ -660,14 +1127,48 @@ def adjust_task_duration_for_days_off(task, employee_manager):
         # Обновляем длительность задачи
         if calendar_days > original_duration:
             print(
-                f"Задача '{task['name']}' (ID: {task['id']}): длительность скорректирована с {original_duration} до {calendar_days} дней")
+                f"Задача '{task['name']}' (ID: {task['id']}): календарная длительность скорректирована с {original_duration} до {calendar_days} дней")
             task['adjusted_duration'] = calendar_days
-
+            # Сохраняем оригинальную рабочую длительность
+            working_duration = original_duration
             # Обновляем в базе данных
             task_manager.db.execute(
-                "UPDATE tasks SET duration = ? WHERE id = ?",
-                (calendar_days, task['id'])
+                "UPDATE tasks SET duration = ?, working_duration = ? WHERE id = ?",
+                (calendar_days, working_duration, task['id'])
             )
+            if task.get('parent_id'):
+                # Получаем все подзадачи родительской задачи
+                parent_subtasks = task_manager.get_subtasks(task['parent_id'])
+                parent_task = task_manager.get_task(task['parent_id'])
+
+                # Группируем по признаку параллельности
+                parallel_subtasks = [t for t in parent_subtasks if t.get('parallel')]
+                sequential_subtasks = [t for t in parent_subtasks if not t.get('parallel')]
+
+                # Находим новую длительность родительской задачи
+                parallel_duration = max([t['duration'] for t in parallel_subtasks]) if parallel_subtasks else 0
+                sequential_duration = sum(t['duration'] for t in sequential_subtasks)
+
+                new_parent_duration = max(parallel_duration, sequential_duration)
+                if sequential_subtasks and parallel_subtasks:
+                    # Если есть и параллельные и последовательные задачи, берем максимум
+                    new_parent_duration = max(parallel_duration, sequential_duration)
+                elif sequential_subtasks:
+                    # Если только последовательные, суммируем
+                    new_parent_duration = sequential_duration
+                elif parallel_subtasks:
+                    # Если только параллельные, берем максимум
+                    new_parent_duration = parallel_duration
+
+                # Обновляем длительность родительской задачи если нужно
+                if new_parent_duration > parent_task['duration']:
+                    print(f"Родительская задача '{parent_task['name']}' (ID: {parent_task['id']}): "
+                          f"длительность скорректирована с {parent_task['duration']} до {new_parent_duration} дней")
+
+                    task_manager.db.execute(
+                        "UPDATE tasks SET duration = ? WHERE id = ?",
+                        (new_parent_duration, task['parent_id'])
+                    )
 
     except Exception as e:
         print(f"Ошибка при корректировке длительности задачи {task.get('name', 'Unknown')}: {str(e)}")
@@ -688,7 +1189,7 @@ async def export_to_jira(callback: CallbackQuery):
         tasks = task_manager.get_all_tasks_by_project(project_id)
 
         # Пробуем прямую интеграцию с Jira API
-        result = jira_exporter.import_to_jira(project, tasks)
+        result = jira_exporter.import_to_jira(project, tasks, employee_manager)
 
         if result['success']:
             # API-интеграция успешна
@@ -771,7 +1272,6 @@ async def show_employee_workload(callback: CallbackQuery):
 
         # Создаем кнопку для возврата к просмотру проекта
         buttons = [
-            [InlineKeyboardButton(text="Назначить сотрудников", callback_data=f"assign_to_project_{project_id}")],
             [InlineKeyboardButton(text="Назад к проекту", callback_data=f"view_project_{project_id}")]
         ]
 

@@ -32,11 +32,17 @@ class EmployeeManager:
             # Преобразуем формат даты 'YYYY-MM-DD' в объект datetime
             from datetime import datetime
             dt = datetime.strptime(date, '%Y-%m-%d')
-            weekday = dt.weekday()  # 0 - понедельник, 6 - воскресенье
+            weekday = dt.weekday() + 1  # +1 чтобы привести к формату 1=пн, 7=вс
 
-            # Проверяем, не выходной ли это день для сотрудника
-            return weekday + 1 not in employee['days_off']  # +1 потому что в базе 1 - понедельник, 7 - воскресенье
+            # Проверяем, не выходной ли это день
+            is_day_off = weekday in employee['days_off']
 
+            # Отладочная информация
+            print(f"Проверка доступности {employee['name']} на {date}: "
+                  f"день недели {weekday}, выходные дни {employee['days_off']}, "
+                  f"результат: {'недоступен' if is_day_off else 'доступен'}")
+
+            return not is_day_off
         except Exception as e:
             raise ValueError(f"Ошибка при проверке доступности сотрудника: {str(e)}")
 
@@ -219,17 +225,20 @@ class EmployeeManager:
                     sequential_tasks = [t for t in tasks if not t.get('parallel')]
 
                     # Для параллельных задач берем максимальную длительность
-                    parallel_duration = max([t['duration'] for t in parallel_tasks]) if parallel_tasks else 0
+                    parallel_duration = max(
+                        [t.get('working_duration', t['duration']) for t in parallel_tasks]) if parallel_tasks else 0
 
                     # Для последовательных задач суммируем
-                    sequential_duration = sum(t['duration'] for t in sequential_tasks)
+                    sequential_duration = sum(t.get('working_duration', t['duration']) for t in sequential_tasks)
 
                     # Добавляем к общей длительности
                     total_duration += (parallel_duration + sequential_duration)
 
                 # Добавляем длительность задач без дат
                 for task in non_dated_tasks:
-                    total_duration += task['duration']
+                    # Используем working_duration если доступно, иначе duration
+                    working_duration = task.get('working_duration', task['duration'])
+                    total_duration += working_duration
 
                 employee_load[employee_id] = total_duration
 
@@ -303,3 +312,32 @@ class EmployeeManager:
 
         except Exception as e:
             raise ValueError(f"Ошибка при проверке загрузки сотрудника: {str(e)}")
+
+    def get_category_by_position(self, position):
+        """
+        Определяет категорию сотрудника по его должности
+
+        Args:
+            position (str): Должность сотрудника
+
+        Returns:
+            str: Название категории ("ПМы", "Настройка", "Контент") или None
+        """
+        if not position:
+            return None
+
+        position = position.lower()
+
+        # ПМы
+        if "проектный менеджер" in position or "пм" in position or "менеджер" in position:
+            return "ПМы"
+
+        # Настройка (проверяем первым, так как имеет приоритет над "специалист")
+        if "настройка" in position or "технический" in position or "руководитель настройки" in position:
+            return "Настройка"
+
+        # Контент
+        if "контент" in position or "специалист" in position:
+            return "Контент"
+
+        return None

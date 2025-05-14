@@ -102,7 +102,7 @@ class NetworkModel:
                         try:
                             end_date = datetime.datetime.strptime(dates['end'], '%Y-%m-%d')
                             start_date = datetime.datetime.strptime(project['start_date'], '%Y-%m-%d')
-                            days_diff = (end_date - start_date).days
+                            days_diff = (end_date - start_date).days + 1
                             end_dates.append(days_diff)
                         except (ValueError, TypeError):
                             pass

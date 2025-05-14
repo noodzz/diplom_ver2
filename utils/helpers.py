@@ -104,17 +104,41 @@ def format_date(date_str):
         return date_str
 
 
-def is_authorized(user_id):
+def is_authorized(user_id, db_manager=None):
     """
     Проверяет, есть ли у пользователя доступ к боту
+    """
+    if db_manager:
+        # Проверяем пользователя в базе данных
+        user = db_manager.get_user(user_id)
+        # Администраторы всегда авторизованы, независимо от статуса активности
+        if user and user['is_admin'] == 1:
+            return True
+        # Обычные пользователи должны быть активными
+        return user is not None and user['is_active'] == 1
+    else:
+        # Резервный вариант
+        return user_id in Config.ALLOWED_USER_IDS
+
+
+def is_admin(user_id, db_manager=None):
+    """
+    Проверяет, является ли пользователь администратором
 
     Args:
         user_id (int): Идентификатор пользователя Telegram
+        db_manager: Опциональный менеджер базы данных
 
     Returns:
-        bool: True, если пользователь имеет доступ, иначе False
+        bool: True, если пользователь имеет права администратора, иначе False
     """
-    return user_id in Config.ALLOWED_USER_IDS
+    if db_manager:
+        # Проверяем права администратора в базе данных
+        user = db_manager.get_user(user_id)
+        return user is not None and user['is_admin'] == 1
+    else:
+        # Резервный вариант - проверка по первому ID в списке
+        return Config.ALLOWED_USER_IDS and user_id == Config.ALLOWED_USER_IDS[0]
 
 
 def add_days_to_date(date_str, days):

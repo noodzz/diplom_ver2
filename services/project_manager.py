@@ -8,19 +8,7 @@ class ProjectManager:
     def __init__(self, db_manager):
         self.db = db_manager
 
-    def create_empty(self, name, start_date):
-        """Создает пустой проект"""
-        try:
-            # Валидация даты
-            datetime.datetime.strptime(start_date, '%Y-%m-%d')
-
-            # Создаем проект
-            project_id = self.db.create_project(name, start_date)
-            return project_id
-        except ValueError:
-            raise ValueError("Некорректный формат даты. Используйте YYYY-MM-DD")
-
-    def create_from_template(self, name, start_date, template_id):
+    def create_from_template(self, name, start_date, template_id, user_id=None):
         """Создает проект из шаблона"""
         try:
             # Валидация даты
@@ -31,9 +19,10 @@ class ProjectManager:
                 raise ValueError(f"Шаблон с ID {template_id} не найден")
 
             template = Config.PROJECT_TEMPLATES[template_id]
+            print(f"ProjectManager: create_from_template, user_id={user_id}")
 
             # Создаем проект
-            project_id = self.db.create_project(name, start_date)
+            project_id = self.db.create_project(name, start_date, user_id)
 
             # Создаем задачи из шаблона
             task_mapping = {}  # Для сопоставления имен задач с их ID
@@ -46,6 +35,7 @@ class ProjectManager:
                     project_id=project_id,
                     name=task_data["name"],
                     duration=task_data["duration"],
+                    working_duration=task_data.get("working_duration", task_data["duration"]),
                     is_group=is_group,
                     position=task_data.get("position")
                 )
@@ -60,6 +50,7 @@ class ProjectManager:
                             parent_id=task_id,  # Убедитесь, что parent_id правильно сохраняется
                             name=subtask["name"],
                             duration=subtask["duration"],
+                            working_duration=task_data.get("working_duration", task_data["duration"]),
                             position=subtask.get("position"),
                             parallel=subtask.get("parallel", False)
                         )
@@ -95,14 +86,14 @@ class ProjectManager:
         except ValueError as e:
             raise ValueError(f"Ошибка при создании проекта из шаблона: {str(e)}")
 
-    def create_from_csv(self, name, start_date, csv_data):
+    def create_from_csv(self, name, start_date, csv_data, user_id=None):
         """Создает проект из данных CSV"""
         try:
             # Валидация даты
             datetime.datetime.strptime(start_date, '%Y-%m-%d')
 
             # Создаем проект
-            project_id = self.db.create_project(name, start_date)
+            project_id = self.db.create_project(name, start_date, user_id)
 
             # Создаем задачи из CSV
             task_mapping = {}  # Для сопоставления имен задач с их ID
@@ -115,6 +106,7 @@ class ProjectManager:
                     project_id=project_id,
                     name=task_data["name"],
                     duration=task_data["duration"],
+                    working_duration=task_data.get("working_duration", task_data["duration"]),
                     is_group=is_group,
                     position=task_data.get("position")
                 )
@@ -161,9 +153,9 @@ class ProjectManager:
         except ValueError as e:
             raise ValueError(f"Ошибка при создании проекта из CSV: {str(e)}")
 
-    def get_all_projects(self):
+    def get_all_projects(self, user_id=None):
         """Возвращает список всех проектов"""
-        projects = self.db.get_projects()
+        projects = self.db.get_projects(user_id)
         return [dict(project) for project in projects]
 
     def get_project_details(self, project_id):
@@ -198,6 +190,7 @@ class ProjectManager:
             project_id=project_id,
             name=task_data["name"],
             duration=task_data["duration"],
+            working_duration=task_data.get("working_duration", task_data["duration"]),
             is_group=is_group,
             position=task_data.get("position")
         )

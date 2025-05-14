@@ -17,6 +17,15 @@ class DatabaseManager:
 
         # Создаем таблицы
         self.cursor.executescript('''
+         -- Таблица пользователей
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            name TEXT,
+            is_admin BOOLEAN DEFAULT 0,
+            is_active BOOLEAN DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        
         -- Таблица сотрудников
         CREATE TABLE IF NOT EXISTS employees (
             id INTEGER PRIMARY KEY,
@@ -31,7 +40,9 @@ class DatabaseManager:
             name TEXT NOT NULL,
             start_date TEXT NOT NULL,
             status TEXT DEFAULT 'active',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            user_id INTEGER,
+            FOREIGN KEY (user_id) REFERENCES users (id)
         );
 
         -- Таблица задач
@@ -48,6 +59,7 @@ class DatabaseManager:
             employee_id INTEGER DEFAULT NULL,
             position TEXT DEFAULT NULL,
             predecessors TEXT DEFAULT NULL,
+            working_duration INTEGER DEFAULT NULL,
             FOREIGN KEY (project_id) REFERENCES projects (id),
             FOREIGN KEY (parent_id) REFERENCES tasks (id),
             FOREIGN KEY (employee_id) REFERENCES employees (id)
@@ -114,21 +126,48 @@ class DatabaseManager:
         return self.cursor.lastrowid
 
     # Методы для работы с проектами
-    def create_project(self, name, start_date):
+    def create_project(self, name, start_date, user_id=None):
         """Создает новый проект"""
         self.connect()
-        self.cursor.execute(
-            "INSERT INTO projects (name, start_date) VALUES (?, ?)",
-            (name, start_date)
-        )
+
+        # Отладочная печать
+        print(f"Создание проекта: name={name}, start_date={start_date}, user_id={user_id}")
+
+        # Проверяем существование поля в таблице
+        self.cursor.execute("PRAGMA table_info(projects)")
+        columns = self.cursor.fetchall()
+        column_names = [column[1] for column in columns]
+
+        if 'user_id' in column_names:
+            # Если поле user_id существует в таблице
+            self.cursor.execute(
+                "INSERT INTO projects (name, start_date, user_id) VALUES (?, ?, ?)",
+                (name, start_date, user_id)
+            )
+        else:
+            # Если поля нет, выполняем миграцию
+            print("ВНИМАНИЕ: Поле user_id отсутствует в таблице projects!")
+            self.cursor.execute(
+                "INSERT INTO projects (name, start_date) VALUES (?, ?)",
+                (name, start_date)
+            )
+
         project_id = self.cursor.lastrowid
+        # Проверяем, сохранился ли user_id
+        self.cursor.execute("SELECT user_id FROM projects WHERE id = ?", (project_id,))
+        saved_user_id = self.cursor.fetchone()[0]
+        print(f"Проект создан с ID: {project_id}, сохраненный user_id: {saved_user_id}")
+
         self.connection.commit()
         self.close()
         return project_id
 
-    def get_projects(self):
+    def get_projects(self, user_id=None):
         """Возвращает список всех проектов"""
-        return self.execute("SELECT * FROM projects ORDER BY created_at DESC")
+        if user_id is not None:
+            return self.execute("SELECT * FROM projects WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
+        else:
+            return self.execute("SELECT * FROM projects ORDER BY created_at DESC")
 
     def get_project(self, project_id):
         """Возвращает информацию о проекте"""
@@ -136,14 +175,16 @@ class DatabaseManager:
         return result[0] if result else None
 
     # Методы для работы с задачами
-    def create_task(self, project_id, name, duration, is_group=False, parent_id=None, position=None, parallel=False):
+    def create_task(self, project_id, name, duration, is_group=False, parent_id=None, position=None, parallel=False,
+                    working_duration=None):
         """Создает новую задачу"""
         self.connect()
+        working_duration = working_duration or duration  # Если не указано, используем duration
         self.cursor.execute(
             """INSERT INTO tasks 
-            (project_id, parent_id, name, duration, is_group, position, parallel) 
-            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (project_id, parent_id, name, duration, is_group, position, parallel)
+            (project_id, parent_id, name, duration, working_duration, is_group, position, parallel) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (project_id, parent_id, name, duration, working_duration, is_group, position, parallel)
         )
         task_id = self.cursor.lastrowid
         self.connection.commit()
@@ -238,3 +279,36 @@ class DatabaseManager:
             ORDER BY id""",
             (project_id,)
         )
+
+    def get_user(self, user_id):
+        """Возвращает информацию о пользователе"""
+        result = self.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        return result[0] if result else None
+
+    def get_all_users(self):
+        """Возвращает список всех пользователей"""
+        return self.execute("SELECT * FROM users ORDER BY created_at DESC")
+
+    def add_user(self, user_id, name=None, is_admin=0):
+        """Добавляет нового пользователя"""
+        self.execute(
+            "INSERT OR IGNORE INTO users (id, name, is_admin) VALUES (?, ?, ?)",
+            (user_id, name or f"User_{user_id}", is_admin)
+        )
+
+    def update_user(self, user_id, is_active=True, is_admin=None):
+        """Обновляет статус пользователя"""
+        if is_admin is not None:
+            self.execute(
+                "UPDATE users SET is_active = ?, is_admin = ? WHERE id = ?",
+                (1 if is_active else 0, 1 if is_admin else 0, user_id)
+            )
+        else:
+            self.execute(
+                "UPDATE users SET is_active = ? WHERE id = ?",
+                (1 if is_active else 0, user_id)
+            )
+
+    def delete_user(self, user_id):
+        """Удаляет пользователя"""
+        self.execute("DELETE FROM users WHERE id = ?", (user_id,))

@@ -447,16 +447,16 @@ class Config:
                     "is_group": True,
                     "subtasks": [
                         {
-                            "name": "Настройка продуктовых типов",
-                            "duration": 2,
+                            "name": "Таблица для скрипта",
+                            "duration": 1,
                             "position": "Технический специалист",
-                            "parallel": True
+                            "parallel": False
                         },
                         {
-                            "name": "Настройка продуктов",
-                            "duration": 2,
-                            "position": "Старший тех. специалист",
-                            "parallel": True
+                            "name": "Создание продуктов и ПТ",
+                            "duration": 1,
+                            "position": "Старший технический специалист",
+                            "parallel": False
                         }
                     ]
                 },
@@ -468,16 +468,16 @@ class Config:
                     "is_group": True,
                     "subtasks": [
                         {
-                            "name": "Настройка потоков",
-                            "duration": 2,
+                            "name": "Таблица для скрипта",
+                            "duration": 1,
                             "position": "Технический специалист",
-                            "parallel": True
+                            "parallel": False
                         },
                         {
-                            "name": "Проверка потоков",
-                            "duration": 2,
-                            "position": "Старший тех. специалист",
-                            "parallel": True
+                            "name": "Создание потоков",
+                            "duration": 1,
+                            "position": "Старший технический специалист",
+                            "parallel": False
                         }
                     ]
                 },
@@ -485,8 +485,29 @@ class Config:
                     "name": "Постконтроль созданных объектов",
                     "duration": 1,
                     "predecessors": ["Создание потоков обучения"],
-                    "position": "Настройка",
+                    "position": "Руководитель настройки",
                     "is_group": False
+                },
+                {
+                    "name": "Создание уровней",
+                    "duration": 2,
+                    "predecessors": [],
+                    "position": "Контент",
+                    "is_group": True,
+                    "subtasks": [
+                        {
+                            "name": "Создание уровней 1",
+                            "duration": 2,
+                            "position": "Старший специалист",
+                            "parallel": True
+                        },
+                        {
+                            "name": "Создание уровней 2",
+                            "duration": 2,
+                            "position": "Старший специалист",
+                            "parallel": True
+                        }
+                    ]
                 },
             ]
         }

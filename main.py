@@ -601,18 +601,6 @@ async def calculate_schedule(callback: CallbackQuery):
             caption=f"Диаграмма Ганта для проекта '{project['name']}'",
         )
 
-        # Если есть распределение задач, отправляем также диаграмму загрузки
-        if assignments:
-            workload_data = employee_manager.get_employee_workload(project_id)
-            if workload_data:
-                workload_image = workload_chart.generate(project, workload_data)
-                workload_file = FSInputFile(workload_image)
-                await bot.send_photo(
-                    callback.from_user.id,
-                    workload_file,
-                    caption=f"Диаграмма загрузки сотрудников для проекта '{project['name']}'",
-                )
-
         # Отправляем кнопки для дальнейших действий
         buttons = [
             [InlineKeyboardButton(text="Просмотреть/изменить распределение", callback_data=f"workload_{project_id}")],
@@ -697,7 +685,7 @@ async def export_to_jira(callback: CallbackQuery):
 
     try:
         project = project_manager.get_project_details(project_id)
-        tasks = task_manager.get_tasks_by_project(project_id)
+        tasks = task_manager.get_all_tasks_by_project(project_id)
 
         # Пробуем прямую интеграцию с Jira API
         result = jira_exporter.import_to_jira(project, tasks)

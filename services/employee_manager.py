@@ -72,7 +72,7 @@ class EmployeeManager:
 
     def get_employee_workload(self, project_id):
         """
-        Возвращает распределение задач по сотрудникам для проекта
+        Возвращает распределение задач по сотрудникам для проекта с учетом одноименных подзадач
 
         Args:
             project_id (int): ID проекта
@@ -87,8 +87,25 @@ class EmployeeManager:
             # Создаем словарь для хранения задач сотрудников
             employee_tasks = {}
 
+            # Сначала загрузим все задачи проекта для получения информации о родительских задачах
+            all_tasks = self.db.execute(
+                """SELECT id, name, parent_id FROM tasks WHERE project_id = ?""",
+                (project_id,)
+            )
+
+            # Создаем словарь для получения имени родительской задачи
+            parent_task_names = {}
+            for task in all_tasks:
+                task_dict = dict(task)
+                if task_dict.get('parent_id'):
+                    # Найдем родительскую задачу
+                    parent = next((t for t in all_tasks if dict(t)['id'] == task_dict['parent_id']), None)
+                    if parent:
+                        parent_dict = dict(parent)
+                        parent_task_names[task_dict['id']] = parent_dict['name']
+
             # Получаем все задачи проекта с назначенными сотрудниками
-            tasks = self.db.execute(
+            assigned_tasks = self.db.execute(
                 """SELECT t.*, p.name as project_name 
                 FROM tasks t 
                 JOIN projects p ON t.project_id = p.id
@@ -96,31 +113,53 @@ class EmployeeManager:
                 (project_id,)
             )
 
+            # Создаем словарь для отслеживания уже добавленных задач для каждого сотрудника
+            processed_task_ids = {}  # employee_id -> set of task IDs
+
             # Группируем задачи по сотрудникам
-            for task in tasks:
+            for task in assigned_tasks:
                 task_dict = dict(task)
                 employee_id = task_dict['employee_id']
+
+                # Инициализируем структуры, если это первая задача для сотрудника
+                if employee_id not in employee_tasks:
+                    employee_tasks[employee_id] = {
+                        'name': '',
+                        'position': '',
+                        'tasks': []
+                    }
+                    processed_task_ids[employee_id] = set()
 
                 # Находим сотрудника
                 employee = next((e for e in employees if e['id'] == employee_id), None)
                 if employee:
-                    # Создаем ключ для сотрудника, если его еще нет
-                    if employee_id not in employee_tasks:
-                        employee_tasks[employee_id] = {
-                            'name': employee['name'],
-                            'position': employee['position'],
-                            'tasks': []
-                        }
+                    employee_tasks[employee_id]['name'] = employee['name']
+                    employee_tasks[employee_id]['position'] = employee['position']
 
-                    # Добавляем задачу
-                    employee_tasks[employee_id]['tasks'].append({
-                        'id': task_dict['id'],
-                        'name': task_dict['name'],
-                        'start_date': task_dict.get('start_date'),
-                        'end_date': task_dict.get('end_date'),
-                        'duration': task_dict['duration'],
-                        'project_name': task_dict['project_name']
-                    })
+                    # Используем ID задачи для уникальной идентификации
+                    task_id = task_dict['id']
+
+                    # Проверяем, не добавляли ли мы уже эту задачу для этого сотрудника
+                    if task_id not in processed_task_ids[employee_id]:
+                        processed_task_ids[employee_id].add(task_id)
+
+                        # Получаем название задачи с учетом родительской задачи
+                        task_name = task_dict['name']
+                        if task_dict.get('parent_id') and task_dict['id'] in parent_task_names:
+                            # Для подзадач формируем название "Родительская задача - Подзадача"
+                            display_name = f"{parent_task_names[task_dict['id']]} - {task_name}"
+                        else:
+                            display_name = task_name
+
+                        employee_tasks[employee_id]['tasks'].append({
+                            'id': task_id,
+                            'name': display_name,  # Используем расширенное имя для отображения
+                            'start_date': task_dict.get('start_date'),
+                            'end_date': task_dict.get('end_date'),
+                            'duration': task_dict['duration'],
+                            'project_name': task_dict['project_name'],
+                            'parallel': task_dict.get('parallel', 0) == 1  # Флаг parallel
+                        })
 
             return employee_tasks
 
@@ -129,7 +168,7 @@ class EmployeeManager:
 
     def generate_workload_report(self, project_id):
         """
-        Генерирует отчет о распределении задач по сотрудникам
+        Генерирует отчет о распределении задач по сотрудникам с учетом параллельных задач
 
         Args:
             project_id (int): ID проекта
@@ -155,10 +194,43 @@ class EmployeeManager:
                 report += "Ни одной задачи не назначено на сотрудников.\n"
                 return report
 
-            # Подсчитываем общую загрузку каждого сотрудника (в днях)
+            # Подсчитываем загрузку каждого сотрудника с учетом параллельных задач
             employee_load = {}
             for employee_id, data in workload.items():
-                total_duration = sum(task['duration'] for task in data['tasks'])
+                # Группируем задачи по дате начала
+                tasks_by_date = {}
+                non_dated_tasks = []
+
+                for task in data['tasks']:
+                    start_date = task.get('start_date')
+                    if start_date:
+                        if start_date not in tasks_by_date:
+                            tasks_by_date[start_date] = []
+                        tasks_by_date[start_date].append(task)
+                    else:
+                        # Задачи без даты обрабатываем отдельно
+                        non_dated_tasks.append(task)
+
+                # Расчет загрузки для задач с датами
+                total_duration = 0
+                for date, tasks in tasks_by_date.items():
+                    # Группируем по признаку параллельности
+                    parallel_tasks = [t for t in tasks if t.get('parallel')]
+                    sequential_tasks = [t for t in tasks if not t.get('parallel')]
+
+                    # Для параллельных задач берем максимальную длительность
+                    parallel_duration = max([t['duration'] for t in parallel_tasks]) if parallel_tasks else 0
+
+                    # Для последовательных задач суммируем
+                    sequential_duration = sum(t['duration'] for t in sequential_tasks)
+
+                    # Добавляем к общей длительности
+                    total_duration += (parallel_duration + sequential_duration)
+
+                # Добавляем длительность задач без дат
+                for task in non_dated_tasks:
+                    total_duration += task['duration']
+
                 employee_load[employee_id] = total_duration
 
             # Группируем сотрудников по должностям

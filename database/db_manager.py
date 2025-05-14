@@ -229,3 +229,12 @@ class DatabaseManager:
         """Возвращает информацию о сотруднике"""
         result = self.execute("SELECT * FROM employees WHERE id = ?", (employee_id,))
         return result[0] if result else None
+
+    def get_all_project_tasks(self, project_id):
+        """Возвращает список ВСЕХ задач проекта, включая подзадачи"""
+        return self.execute(
+            """SELECT * FROM tasks 
+            WHERE project_id = ?
+            ORDER BY id""",
+            (project_id,)
+        )

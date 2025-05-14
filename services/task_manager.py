@@ -219,3 +219,26 @@ class TaskManager:
                 except ValueError:
                     # Задача не найдена, пропускаем
                     continue
+
+    def get_all_tasks_by_project(self, project_id):
+        """Возвращает список всех задач проекта, включая подзадачи"""
+        tasks = self.db.get_all_project_tasks(project_id)
+        result = []
+
+        for task in tasks:
+            task_dict = dict(task)
+
+            # Добавляем информацию о предшественниках
+            if 'predecessors' in task_dict and task_dict['predecessors']:
+                try:
+                    task_dict['predecessors'] = json.loads(task_dict['predecessors'])
+                except (json.JSONDecodeError, TypeError):
+                    task_dict['predecessors'] = []
+            else:
+                # Если в задаче нет информации о предшественниках, получаем ее из таблицы зависимостей
+                dependencies = self.db.get_task_dependencies(task_dict['id'])
+                task_dict['predecessors'] = [dep['predecessor_id'] for dep in dependencies]
+
+            result.append(task_dict)
+
+        return result

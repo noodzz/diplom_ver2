@@ -55,14 +55,17 @@ class ProjectManager:
                 # Если это групповая задача, создаем подзадачи
                 if is_group and "subtasks" in task_data:
                     for subtask in task_data["subtasks"]:
-                        self.db.create_task(
+                        subtask_id = self.db.create_task(
                             project_id=project_id,
-                            parent_id=task_id,
+                            parent_id=task_id,  # Убедитесь, что parent_id правильно сохраняется
                             name=subtask["name"],
                             duration=subtask["duration"],
-                            position=subtask["position"],
+                            position=subtask.get("position"),
                             parallel=subtask.get("parallel", False)
                         )
+                        # Добавляем логирование для отладки
+                        print(
+                            f"Создана подзадача '{subtask['name']}' (ID: {subtask_id}) для задачи '{task_data['name']}' (ID: {task_id})")
 
             # Затем устанавливаем зависимости
             for task_data in template["tasks"]:

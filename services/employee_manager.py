@@ -190,3 +190,44 @@ class EmployeeManager:
 
         except Exception as e:
             raise ValueError(f"Ошибка при создании отчета: {str(e)}")
+
+    def check_employee_workload(self, employee_id, start_date, end_date):
+        """
+        Проверяет загрузку сотрудника в указанном диапазоне дат
+
+        Args:
+            employee_id (int): ID сотрудника
+            start_date (str): Дата начала в формате 'YYYY-MM-DD'
+            end_date (str): Дата окончания в формате 'YYYY-MM-DD'
+
+        Returns:
+            list: Список задач, назначенных на сотрудника в указанном диапазоне
+        """
+        try:
+            # Получаем все задачи, назначенные на сотрудника
+            tasks = self.db.execute(
+                """SELECT t.*, p.name as project_name, p.start_date as project_start_date 
+                FROM tasks t 
+                JOIN projects p ON t.project_id = p.id
+                WHERE t.employee_id = ?""",
+                (employee_id,)
+            )
+
+            # Фильтруем задачи по диапазону дат
+            filtered_tasks = []
+            for task in tasks:
+                task_dict = dict(task)
+
+                # Если у задачи есть даты начала и окончания, проверяем пересечение с указанным диапазоном
+                if task_dict.get('start_date') and task_dict.get('end_date'):
+                    task_start = task_dict['start_date']
+                    task_end = task_dict['end_date']
+
+                    # Проверяем, пересекаются ли диапазоны дат
+                    if not (task_end < start_date or task_start > end_date):
+                        filtered_tasks.append(task_dict)
+
+            return filtered_tasks
+
+        except Exception as e:
+            raise ValueError(f"Ошибка при проверке загрузки сотрудника: {str(e)}")

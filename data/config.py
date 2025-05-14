@@ -45,13 +45,13 @@ class Config:
                     "subtasks": [
                         {
                             "name": "Собрать таблицу для скрипта",
-                            "duration": 2,
+                            "duration": 1,
                             "position": "Технический специалист",
                             "parallel": False
                         },
                         {
                             "name": "Создать продукты и ПТ",
-                            "duration": 2,
+                            "duration": 1,
                             "position": "Старший технический специалист",
                             "parallel": False
                         }
@@ -181,19 +181,19 @@ class Config:
                     "is_group": True,
                     "subtasks": [
                         {
-                            "name": "Старший технический специалист",
+                            "name": "Постконтроль объектов",
                             "duration": 2,
                             "position": "Старший технический специалист",
                             "parallel": True
                         },
                         {
-                            "name": "Старший технический специалист",
+                            "name": "Постконтроль объектов",
                             "duration": 2,
                             "position": "Старший технический специалист",
                             "parallel": True
                         },
                         {
-                            "name": "Руководитель настройки",
+                            "name": "Постконтроль объектов",
                             "duration": 2,
                             "position": "Руководитель настройки",
                             "parallel": True
@@ -208,13 +208,13 @@ class Config:
                     "is_group": True,
                     "subtasks": [
                         {
-                            "name": "Младший специалист",
+                            "name": "Подготовить таблицу для модулей",
                             "duration": 1,
                             "position": "Младший специалист",
                             "parallel": False
                         },
                         {
-                            "name": "Руководитель контента",
+                            "name": "Создать модули",
                             "duration": 1,
                             "position": "Руководитель контента",
                             "parallel": False
@@ -229,13 +229,13 @@ class Config:
                     "is_group": True,
                     "subtasks": [
                         {
-                            "name": "Младший специалист",
+                            "name": "Подготовить таблицу для уровней",
                             "duration": 1,
                             "position": "Младший специалист",
                             "parallel": False
                         },
                         {
-                            "name": "Руководитель контента",
+                            "name": "Создать уровни",
                             "duration": 1,
                             "position": "Руководитель контента",
                             "parallel": False
@@ -264,25 +264,25 @@ class Config:
                     "is_group": True,
                     "subtasks": [
                         {
-                            "name": "Старший специалист",
+                            "name": "Сборка сводной",
                             "duration": 7,
                             "position": "Старший специалист",
                             "parallel": True
                         },
                         {
-                            "name": "Старший специалист",
+                            "name": "Сборка сводной",
                             "duration": 7,
                             "position": "Старший специалист",
                             "parallel": True
                         },
                         {
-                            "name": "Старший специалист",
+                            "name": "Сборка сводной",
                             "duration": 7,
                             "position": "Старший специалист",
                             "parallel": True
                         },
                         {
-                            "name": "Руководитель контента",
+                            "name": "Сборка сводной",
                             "duration": 7,
                             "position": "Руководитель контента",
                             "parallel": True
@@ -366,7 +366,7 @@ class Config:
                         {
                             "name": "Перенос наполнения",
                             "duration": 3,
-                            "position": "СМладший специалист",
+                            "position": "Младший специалист",
                             "parallel": True
                         },
                         {
@@ -405,7 +405,7 @@ class Config:
                         {
                             "name": "Постконтроль",
                             "duration": 7,
-                            "position": "СМладший специалист",
+                            "position": "Младший специалист",
                             "parallel": True
                         },
                         {

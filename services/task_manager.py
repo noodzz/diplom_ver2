@@ -242,3 +242,4 @@ class TaskManager:
             result.append(task_dict)
 
         return result
+

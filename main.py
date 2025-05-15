@@ -25,6 +25,7 @@ from services.network_model import NetworkModel
 from services.gantt_chart import GanttChart
 from services.workload_chart import WorkloadChart
 from utils.helpers import parse_csv, format_date, is_authorized, is_admin
+from utils.scheduler import schedule_project, update_database_assignments
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -699,128 +700,30 @@ async def calculate_schedule(callback: CallbackQuery):
     try:
         project = project_manager.get_project_details(project_id)
         tasks = task_manager.get_tasks_by_project(project_id)
+        result = schedule_project(project, tasks, task_manager, employee_manager)
 
-        # ШАГ 1: Назначаем сотрудников на задачи (без привязки к датам)
-        assignments = {}  # Словарь для хранения назначений
+        update_database_assignments(result['task_dates'], task_manager,employee_manager)
 
-        # Получаем список сотрудников
-        all_employees = employee_manager.get_all_employees()
+        # Извлекаем результаты
+        task_dates = result['task_dates']
+        critical_path = result['critical_path']
+        duration = result['duration']
 
-        # Группируем сотрудников по должностям
-        employee_by_position = {}
-        for employee in all_employees:
-            position = employee['position']
-            if position not in employee_by_position:
-                employee_by_position[position] = []
-            employee_by_position[position].append(employee)
+        assignments = {}
+        if task_dates:
+            for task_id, dates in task_dates.items():
+                if 'employee_id' in dates:
+                    assignments[task_id] = dates['employee_id']
 
-        # Словарь для отслеживания загрузки сотрудников (в днях)
-        employee_workload = {}
-        for employee in all_employees:
-            employee_workload[employee['id']] = 0
-
-        # Назначаем сотрудников на основные задачи
-        print("Назначаем сотрудников на основные задачи...")
-        for task in tasks:
-            if not task['is_group'] and not task.get('parent_id'):
-                position = task.get('position')
-                if not position:
-                    print(f"Пропускаем задачу {task['name']} (ID: {task['id']}): не указана должность")
-                    continue
-
-                suitable_employees = employee_by_position.get(position, [])
-                if not suitable_employees:
-                    print(f"Пропускаем задачу {task['name']} (ID: {task['id']}): нет сотрудников должности {position}")
-                    continue
-
-                # Находим наименее загруженного сотрудника
-                best_employee = None
-                min_load = float('inf')
-
-                for employee in suitable_employees:
-                    load = employee_workload[employee['id']]
-                    if load < min_load:
-                        min_load = load
-                        best_employee = employee
-
-                # Назначаем сотрудника на задачу
-                if best_employee:
-                    task_manager.assign_employee(task['id'], best_employee['id'])
-                    assignments[task['id']] = best_employee['id']
-
-                    # Обновляем загрузку сотрудника
-                    employee_workload[best_employee['id']] += task['duration']
-                    print(f"Сотрудник {best_employee['name']} назначен на задачу {task['name']}")
-
-        # Получаем подзадачи для групповых задач напрямую из БД
-        print("Назначаем сотрудников на подзадачи...")
-        all_subtasks = {}
-        for task in tasks:
-            if task['is_group']:
-                db_subtasks = task_manager.db.execute(
-                    "SELECT * FROM tasks WHERE parent_id = ?",
-                    (task['id'],)
-                )
-                if db_subtasks:
-                    all_subtasks[task['id']] = [dict(subtask) for subtask in db_subtasks]
-
-        # Назначаем сотрудников на подзадачи
-        for task_id, subtasks in all_subtasks.items():
-            for subtask in subtasks:
-                position = subtask.get('position')
-                if not position:
-                    print(f"Пропускаем подзадачу {subtask['name']} (ID: {subtask['id']}): не указана должность")
-                    continue
-
-                suitable_employees = employee_by_position.get(position, [])
-                if not suitable_employees:
-                    print(
-                        f"Пропускаем подзадачу {subtask['name']} (ID: {subtask['id']}): нет сотрудников должности {position}")
-                    continue
-
-                # Находим наименее загруженного сотрудника
-                best_employee = None
-                min_load = float('inf')
-
-                for employee in suitable_employees:
-                    load = employee_workload[employee['id']]
-                    if load < min_load:
-                        min_load = load
-                        best_employee = employee
-
-                # Назначаем сотрудника на подзадачу
-                if best_employee:
-                    task_manager.assign_employee(subtask['id'], best_employee['id'])
-                    assignments[subtask['id']] = best_employee['id']
-
-                    # Обновляем загрузку сотрудника
-                    employee_workload[best_employee['id']] += subtask['duration']
-                    print(f"Сотрудник {best_employee['name']} назначен на подзадачу {subtask['name']}")
-
-        # ШАГ 2: Корректируем длительности задач с учетом выходных дней сотрудников
-        print("Корректируем длительности задач с учетом выходных дней...")
-        for task in tasks:
-            if not task['is_group'] and task.get('employee_id'):
-                adjust_task_duration_for_days_off(task, employee_manager)
-
-        for task_id, subtasks in all_subtasks.items():
-            for subtask in subtasks:
-                if subtask.get('employee_id'):
-                    adjust_task_duration_for_days_off(subtask, employee_manager)
-
-        # ШАГ 3: Рассчитываем календарный план с учетом скорректированных длительностей
-        print("Рассчитываем календарный план...")
-        result = network_model.calculate(project, tasks)
-
-        # ШАГ 4: Обновляем даты задач в базе данных
+        # Обновляем даты задач в базе данных
         print("Обновляем даты задач...")
-        task_manager.update_task_dates(result['task_dates'])
-        # Рассчитываем и сохраняем даты подзадач
-        subtask_dates = calculate_subtask_dates(task_manager, result['task_dates'])
-        if subtask_dates:
-            task_manager.update_task_dates(subtask_dates)
-            print(f"Обновлены даты для {len(subtask_dates)} подзадач")
-        # ШАГ 5: Генерируем отчет о результатах
+        task_manager.update_task_dates(task_dates)
+
+        # Отладочная информация
+        print(f"Критический путь: {critical_path}")
+        print(f"Длительность проекта: {duration} дней")
+        print(f"Назначено сотрудников: {len(assignments)}")
+
         print("Генерируем отчет...")
         text = f"📊 ОТЧЕТ ПО КАЛЕНДАРНОМУ ПЛАНУ\n"
         text += f"=============================================\n\n"
@@ -1022,9 +925,12 @@ async def calculate_schedule(callback: CallbackQuery):
                 os.remove(gantt_image)
         except Exception as e:
             print(f"Ошибка при очистке временных файлов: {str(e)}")
-
     except Exception as e:
-        await callback.message.edit_text(f"Ошибка при расчете календарного плана: {str(e)}")
+        import traceback
+        error_msg = f"Ошибка при расчете календарного плана: {str(e)}\n{traceback.format_exc()}"
+        print(error_msg)
+        await callback.message.edit_text(error_msg)
+        return
 
 
 def calculate_subtask_dates(task_manager, task_dates):
@@ -1174,6 +1080,437 @@ def adjust_task_duration_for_days_off(task, employee_manager):
         print(f"Ошибка при корректировке длительности задачи {task.get('name', 'Unknown')}: {str(e)}")
 
 
+def assign_task_with_days_off(task, project_start_date, employee_manager, suitable_employees, employee_workload):
+    """
+    Назначает сотрудника на задачу с учетом выходных дней
+
+    Args:
+        task (dict): Задача для назначения
+        project_start_date (str): Дата начала проекта в формате '%Y-%m-%d'
+        employee_manager: Менеджер сотрудников для проверки доступности
+        suitable_employees (list): Список подходящих сотрудников
+        employee_workload (dict): Словарь загрузки сотрудников
+
+    Returns:
+        tuple: (employee_id, start_date, end_date, calendar_duration) - ID назначенного сотрудника,
+              новая дата начала, новая дата окончания и фактическая длительность в календарных днях
+    """
+    import datetime
+
+    print(f"Назначение сотрудника на задачу '{task['name']}' с учетом выходных дней")
+
+    # Преобразуем дату начала проекта в объект datetime
+    try:
+        start_date = datetime.datetime.strptime(project_start_date, '%Y-%m-%d')
+    except (ValueError, TypeError):
+        # Если дата некорректна, используем текущую
+        start_date = datetime.datetime.now()
+
+    duration = task.get('duration', 1)  # Длительность задачи в рабочих днях
+
+    # Находим наиболее подходящего сотрудника с учетом выходных дней
+    best_employee = None
+    best_start_date = start_date
+    best_end_date = None
+    best_calendar_duration = float('inf')
+
+    for employee in suitable_employees:
+        # Проверяем доступность сотрудника на каждый день с учетом выходных
+        employee_id = employee['id']
+        current_date = start_date
+        working_days = 0
+        calendar_days = 0
+
+        # Максимальное количество дней для поиска (защита от бесконечного цикла)
+        max_days = duration * 3  # Берем с запасом
+
+        while working_days < duration and calendar_days < max_days:
+            date_str = current_date.strftime('%Y-%m-%d')
+
+            # Проверяем, является ли этот день рабочим для сотрудника
+            is_available = employee_manager.is_available(employee_id, date_str)
+
+            if is_available:
+                working_days += 1
+
+            # Увеличиваем счетчик календарных дней и переходим к следующему дню
+            calendar_days += 1
+            current_date = current_date + datetime.timedelta(days=1)
+
+        # Если удалось набрать нужное количество рабочих дней
+        if working_days == duration:
+            # Вычисляем дату окончания (последний рабочий день)
+            end_date = current_date - datetime.timedelta(days=1)
+
+            # Учитываем текущую загрузку сотрудника
+            current_load = employee_workload.get(employee_id, 0)
+
+            # Предпочитаем сотрудника с меньшей загрузкой
+            # и с меньшей календарной длительностью для задачи
+            if (best_employee is None or
+                    current_load < employee_workload.get(best_employee['id'], 0) or
+                    (current_load == employee_workload.get(best_employee['id'], 0) and
+                     calendar_days < best_calendar_duration)):
+                best_employee = employee
+                best_calendar_duration = calendar_days
+                best_end_date = end_date
+        else:
+            print(f"Сотрудник {employee['name']} не может выполнить задачу из-за выходных дней")
+
+    if best_employee:
+        # Обновляем загрузку выбранного сотрудника
+        employee_workload[best_employee['id']] = employee_workload.get(best_employee['id'], 0) + duration
+
+        print(f"Задача '{task['name']}' назначена сотруднику {best_employee['name']}")
+        print(f"  Начало: {best_start_date.strftime('%Y-%m-%d')}")
+        print(f"  Окончание: {best_end_date.strftime('%Y-%m-%d')}")
+        print(f"  Рабочих дней: {duration}")
+        print(f"  Календарных дней: {best_calendar_duration}")
+
+        return (best_employee['id'],
+                best_start_date.strftime('%Y-%m-%d'),
+                best_end_date.strftime('%Y-%m-%d'),
+                best_calendar_duration)
+    else:
+        print(f"Не удалось назначить сотрудника на задачу '{task['name']}' с учетом выходных дней")
+        return None, None, None, None
+
+
+def calculate_project_duration(start_date_str, task_dates):
+    """Рассчитывает общую длительность проекта в днях"""
+    import datetime
+
+    # Если нет задач с датами, возвращаем 0
+    if not task_dates:
+        return 0
+
+    # Преобразуем строковую дату в объект datetime
+    try:
+        project_start = datetime.datetime.strptime(start_date_str, '%Y-%m-%d')
+    except (ValueError, TypeError):
+        return 0
+
+    # Находим самую позднюю дату окончания
+    latest_end_date = None
+
+    for task_id, dates in task_dates.items():
+        if 'end' in dates:
+            try:
+                end_date = datetime.datetime.strptime(dates['end'], '%Y-%m-%d')
+                if latest_end_date is None or end_date > latest_end_date:
+                    latest_end_date = end_date
+            except (ValueError, TypeError):
+                continue
+
+    # Если не нашли дату окончания, возвращаем 0
+    if latest_end_date is None:
+        return 0
+
+    # Рассчитываем длительность в днях
+    duration = (latest_end_date - project_start).days + 1  # +1 так как включаем день окончания
+    return duration
+
+
+def calculate_critical_path(task_dates, tasks, task_manager):
+    """
+    Вычисляет критический путь проекта
+
+    Args:
+        task_dates (dict): Словарь с датами начала и окончания задач
+        tasks (list): Список задач проекта
+        task_manager: Менеджер задач
+
+    Returns:
+        list: Список ID задач, образующих критический путь
+    """
+    import datetime
+
+    # Если нет данных о датах, возвращаем пустой список
+    if not task_dates:
+        return []
+
+    # Ищем самую позднюю дату окончания проекта
+    latest_end_date = None
+    latest_task_id = None
+
+    for task_id, dates in task_dates.items():
+        if 'end' in dates:
+            try:
+                end_date = datetime.datetime.strptime(dates['end'], '%Y-%m-%d')
+                if latest_end_date is None or end_date > latest_end_date:
+                    latest_end_date = end_date
+                    latest_task_id = task_id
+            except (ValueError, TypeError):
+                continue
+
+    # Если не нашли последнюю задачу, возвращаем пустой список
+    if latest_task_id is None:
+        return []
+
+    # Находим путь от последней задачи к начальным задачам
+    critical_path = []
+    current_task_id = latest_task_id
+
+    while current_task_id is not None:
+        critical_path.append(current_task_id)
+
+        # Находим предшественников текущей задачи
+        dependencies = task_manager.get_task_dependencies(current_task_id)
+
+        if not dependencies:
+            # Это начальная задача, путь построен
+            break
+
+        # Ищем предшественника с самой поздней датой окончания
+        latest_predecessor_id = None
+        latest_predecessor_end = None
+
+        for dep in dependencies:
+            predecessor_id = dep['predecessor_id']
+            if predecessor_id in task_dates and 'end' in task_dates[predecessor_id]:
+                try:
+                    end_date = datetime.datetime.strptime(task_dates[predecessor_id]['end'], '%Y-%m-%d')
+                    if latest_predecessor_end is None or end_date > latest_predecessor_end:
+                        latest_predecessor_end = end_date
+                        latest_predecessor_id = predecessor_id
+                except (ValueError, TypeError):
+                    continue
+
+        # Переходим к предшественнику или завершаем, если предшественников нет
+        current_task_id = latest_predecessor_id
+
+    # Возвращаем критический путь в обратном порядке (от начала к концу)
+    return list(reversed(critical_path))
+
+
+def calculate_project_schedule(project, tasks, task_manager, employee_manager):
+    """
+    Рассчитывает календарный план проекта с учетом выходных дней сотрудников
+
+    Args:
+        project (dict): Информация о проекте
+        tasks (list): Список задач проекта
+        task_manager: Менеджер задач для работы с зависимостями
+        employee_manager: Менеджер сотрудников
+
+    Returns:
+        dict: Результаты расчета с учетом выходных дней
+    """
+    import datetime
+
+    print(f"Расчет календарного плана для проекта '{project['name']}'")
+
+    # Получаем всех сотрудников
+    all_employees = employee_manager.get_all_employees()
+
+    # Группируем сотрудников по должностям
+    employee_by_position = {}
+    for employee in all_employees:
+        position = employee['position']
+        if position not in employee_by_position:
+            employee_by_position[position] = []
+        employee_by_position[position].append(employee)
+
+    # Словарь для отслеживания загрузки сотрудников (в днях)
+    employee_workload = {}
+    for employee in all_employees:
+        employee_workload[employee['id']] = 0
+
+    # Словарь для хранения дат задач
+    task_dates = {}
+
+    # Сортируем задачи в порядке зависимостей (топологическая сортировка)
+    # Упрощенно: сначала обрабатываем задачи без предшественников
+    sorted_tasks = []
+    processed_tasks = set()
+
+    # Функция для проверки, все ли предшественники задачи обработаны
+    def are_all_predecessors_processed(task, task_manager):
+        # Получаем зависимости, используя task_manager
+        if 'predecessors' in task and task['predecessors']:
+            predecessors = task['predecessors']
+            if isinstance(predecessors, str):
+                try:
+                    import json
+                    predecessors = json.loads(predecessors)
+                except:
+                    predecessors = []
+        else:
+            # Получаем зависимости из базы данных
+            dependencies = task_manager.get_task_dependencies(task['id'])
+            predecessors = [dep['predecessor_id'] for dep in dependencies]
+
+        # Проверяем, все ли предшественники обработаны
+        for predecessor_id in predecessors:
+            if predecessor_id not in processed_tasks:
+                return False
+        return True
+
+    # Добавляем все задачи в отсортированный список
+    remaining_tasks = list(tasks)
+    while remaining_tasks:
+        # Ищем задачи, у которых все предшественники уже обработаны
+        this_round_tasks = []
+        for task in remaining_tasks:
+            if are_all_predecessors_processed(task, task_manager):
+                this_round_tasks.append(task)
+                processed_tasks.add(task['id'])
+
+        # Если не нашли ни одной задачи, но список не пуст - значит, есть циклические зависимости
+        if not this_round_tasks and remaining_tasks:
+            print("Обнаружены циклические зависимости. Обрабатываем оставшиеся задачи без учета зависимостей.")
+            for task in remaining_tasks:
+                sorted_tasks.append(task)
+                processed_tasks.add(task['id'])
+            break
+
+        # Добавляем найденные задачи в отсортированный список
+        sorted_tasks.extend(this_round_tasks)
+
+        # Удаляем обработанные задачи из оставшихся
+        remaining_tasks = [task for task in remaining_tasks if task['id'] not in processed_tasks]
+
+    # Обрабатываем задачи в отсортированном порядке
+    for task in sorted_tasks:
+        # Пропускаем групповые задачи, они обрабатываются особым образом
+        if task.get('is_group'):
+            continue
+
+        # Определяем дату начала задачи (по умолчанию - дата начала проекта)
+        start_date = project['start_date']
+
+        # Получаем зависимости с использованием task_manager
+        dependencies = []
+
+        # Получаем зависимости из поля predecessors
+        if 'predecessors' in task and task['predecessors']:
+            predecessors = task['predecessors']
+            if isinstance(predecessors, list):
+                dependencies.extend(predecessors)
+            elif isinstance(predecessors, str):
+                try:
+                    import json
+                    parsed_deps = json.loads(predecessors)
+                    if isinstance(parsed_deps, list):
+                        dependencies.extend(parsed_deps)
+                except:
+                    # Если не удалось разобрать JSON, может быть это CSV
+                    if ',' in predecessors:
+                        deps = [dep.strip() for dep in predecessors.split(',')]
+                        dependencies.extend(deps)
+
+        # Также получаем зависимости из базы данных
+        db_deps = task_manager.get_task_dependencies(task['id'])
+        for dep in db_deps:
+            predecessor_id = dep['predecessor_id']
+            if predecessor_id not in dependencies:
+                dependencies.append(predecessor_id)
+
+        print(f"Задача '{task['name']}' (ID: {task['id']}) имеет предшественников: {dependencies}")
+
+        # Если есть предшественники, определяем дату начала задачи как
+        # следующий день после самой поздней даты окончания предшественников
+        latest_end_date = None
+
+        for predecessor_id in dependencies:
+            if predecessor_id in task_dates:
+                predecessor_end_date = task_dates[predecessor_id]['end']
+
+                try:
+                    # Преобразуем даты в объекты datetime для сравнения
+                    import datetime
+                    end_date_obj = datetime.datetime.strptime(predecessor_end_date, '%Y-%m-%d')
+
+                    if latest_end_date is None or end_date_obj > latest_end_date:
+                        latest_end_date = end_date_obj
+                except (ValueError, TypeError) as e:
+                    print(f"Ошибка при обработке даты: {e}")
+
+        # Если нашли дату окончания предшественника, устанавливаем дату начала задачи
+        if latest_end_date is not None:
+            # Следующий день после окончания последнего предшественника
+            next_day = (latest_end_date + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+
+            # Сравниваем с датой начала проекта и выбираем более позднюю
+            try:
+                project_start_obj = datetime.datetime.strptime(start_date, '%Y-%m-%d')
+                next_day_obj = datetime.datetime.strptime(next_day, '%Y-%m-%d')
+
+                if next_day_obj > project_start_obj:
+                    start_date = next_day
+                    print(f"Задача '{task['name']}' начнется {start_date} (после предшественников)")
+                else:
+                    print(f"Задача '{task['name']}' начнется {start_date} (дата начала проекта)")
+
+            except (ValueError, TypeError) as e:
+                print(f"Ошибка при сравнении дат: {e}")
+        else:
+            print(f"Задача '{task['name']}' начнется {start_date} (нет предшественников или их даты не определены)")
+
+        # Определяем подходящих сотрудников по должности
+        position = task.get('position')
+        if position:
+            suitable_employees = employee_by_position.get(position, [])
+
+            if suitable_employees:
+                # Назначаем сотрудника с учетом выходных дней
+                employee_id, new_start_date, new_end_date, calendar_duration = assign_task_with_days_off(
+                    task,
+                    start_date,
+                    employee_manager,
+                    suitable_employees,
+                    employee_workload
+                )
+
+                if employee_id:
+                    # Обновляем информацию о задаче
+                    task_dates[task['id']] = {
+                        'start': new_start_date,
+                        'end': new_end_date,
+                        'employee_id': employee_id,
+                        'duration': calendar_duration
+                    }
+            else:
+                print(f"Нет подходящих сотрудников для задачи '{task['name']}'")
+        else:
+            print(f"Не указана должность для задачи '{task['name']}'")
+
+    # Обработка групповых задач
+    for task in sorted_tasks:
+        if task.get('is_group'):
+            # Получаем подзадачи
+            subtasks = [t for t in tasks if t.get('parent_id') == task['id']]
+
+            if subtasks:
+                # Определяем даты начала и окончания на основе подзадач
+                subtask_start_dates = []
+                subtask_end_dates = []
+
+                for subtask in subtasks:
+                    if subtask['id'] in task_dates:
+                        subtask_start_dates.append(task_dates[subtask['id']]['start'])
+                        subtask_end_dates.append(task_dates[subtask['id']]['end'])
+
+                if subtask_start_dates and subtask_end_dates:
+                    # Для групповой задачи устанавливаем самую раннюю дату начала и самую позднюю дату окончания
+                    group_start_date = min(subtask_start_dates)
+                    group_end_date = max(subtask_end_dates)
+
+                    task_dates[task['id']] = {
+                        'start': group_start_date,
+                        'end': group_end_date
+                    }
+
+    # Рассчитываем критический путь
+    critical_path = calculate_critical_path(task_dates, tasks, task_manager)
+
+    # Возвращаем результаты расчета
+    return {
+        'task_dates': task_dates,
+        'duration': calculate_project_duration(project['start_date'], task_dates),
+        'critical_path': critical_path
+    }
+
 # -----------------------------------------------------------------------------
 # Экспорт в Jira
 # -----------------------------------------------------------------------------
@@ -1260,37 +1597,99 @@ async def show_employee_workload(callback: CallbackQuery):
         await callback.message.edit_text("Ошибка: некорректный идентификатор проекта")
         return
 
+    # Получаем данные о проекте
+    project = project_manager.get_project_details(project_id)
+
+    await show_workload_report(callback, project_id, employee_manager, project, task_manager)
+
+
+async def show_workload_report(callback, project_id, employee_manager, project, task_manager):
+    """
+    Отображает отчет о распределении задач с учетом ограничений Telegram
+
+    Args:
+        callback: Callback от Telegram
+        project_id: ID проекта
+        employee_manager: Менеджер сотрудников
+        project: Информация о проекте
+        task_manager: Менеджер задач
+    """
     try:
-        # Получаем данные о проекте
-        project = project_manager.get_project_details(project_id)
-
-        # Получаем распределение задач по сотрудникам
-        workload_data = employee_manager.get_employee_workload(project_id)
-
         # Генерируем отчет о распределении задач
         report = employee_manager.generate_workload_report(project_id)
 
-        # Создаем кнопку для возврата к просмотру проекта
-        buttons = [
-            [InlineKeyboardButton(text="Назад к проекту", callback_data=f"view_project_{project_id}")]
-        ]
+        # Проверяем длину отчета
+        if len(report) <= 4000:  # Оставляем запас до лимита в 4096 символов
+            # Если отчет короткий, отправляем его напрямую
+            markup = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Назад к проекту", callback_data=f"view_project_{project_id}")]
+            ])
+            await callback.message.edit_text(report, reply_markup=markup)
+        else:
+            # Если отчет слишком длинный, сохраняем его в файл и отправляем как документ
+            temp_dir = tempfile.mkdtemp()
 
-        markup = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await callback.message.edit_text(report, reply_markup=markup)
+            # Создаем безопасное имя файла
+            safe_project_name = "".join(
+                c if c.isalnum() or c in [' ', '.', '_', '-'] else '_' for c in project['name']
+            )
+            file_path = os.path.join(temp_dir, f"{safe_project_name}_workload_report.txt")
+
+            # Записываем отчет в файл
+            with open(file_path, 'w', encoding='utf-8') as file:
+                file.write(report)
+
+            # Отправляем краткое сообщение
+            await callback.message.edit_text(
+                f"Отчет о распределении задач для проекта '{project['name']}' прикреплен ниже. "
+                f"В проекте задействовано {len(employee_manager.get_employee_workload(project_id))} сотрудников."
+            )
+
+            # Отправляем файл с отчетом
+            file = FSInputFile(file_path)
+            await callback.message.answer_document(
+                file,
+                caption=f"Отчет о распределении задач для проекта '{project['name']}'"
+            )
+
+            # Отправляем кнопки для дальнейших действий
+            markup = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Назад к проекту", callback_data=f"view_project_{project_id}")]
+            ])
+            await callback.message.answer("Выберите дальнейшее действие:", reply_markup=markup)
+
+            # Очистка временных файлов
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                os.rmdir(temp_dir)
+            except Exception as e:
+                print(f"Ошибка при очистке временных файлов: {str(e)}")
 
         # Генерируем и отправляем диаграмму загрузки сотрудников
-        workload_image = workload_chart.generate(project, workload_data)
-
-        workload_file = FSInputFile(workload_image)
-        await bot.send_photo(
-            callback.from_user.id,
-            workload_file,
-            caption=f"Диаграмма загрузки сотрудников для проекта '{project['name']}'",
-        )
+        workload_data = employee_manager.get_employee_workload(project_id)
+        if workload_chart and workload_data:
+            workload_image = workload_chart.generate(project, workload_data)
+            if os.path.exists(workload_image):
+                workload_file = FSInputFile(workload_image)
+                await callback.message.answer_photo(
+                    workload_file,
+                    caption=f"Диаграмма загрузки сотрудников для проекта '{project['name']}'"
+                )
 
     except Exception as e:
-        await callback.message.edit_text(f"Ошибка при получении распределения задач: {str(e)}")
+        import traceback
+        error_msg = f"Ошибка при получении распределения задач: {str(e)}\n{traceback.format_exc()}"
+        print(error_msg)
 
+        # Отправляем укороченное сообщение об ошибке
+        short_error = f"Ошибка при получении распределения задач: {str(e)}"
+        await callback.message.edit_text(
+            short_error,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Назад к проекту", callback_data=f"view_project_{project_id}")]
+            ])
+        )
 
 @router.callback_query(lambda c: c.data.startswith("assign_to_project_"))
 async def assign_to_project(callback: CallbackQuery):

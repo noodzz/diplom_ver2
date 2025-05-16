@@ -16,22 +16,15 @@ def check_employee_availability(employee_id, start_date, duration, employee_mana
     try:
         # Преобразуем дату начала в объект datetime
         current_date = datetime.datetime.strptime(start_date, '%Y-%m-%d')
-
+        working_days = 0
         # Проверяем каждый день
-        for day in range(duration):
+        for i in range(duration * 2):  # Проверяем с запасом
             date_str = current_date.strftime('%Y-%m-%d')
-
-            # Проверяем доступность сотрудника на этот день
-            if not employee_manager.is_available(employee_id, date_str):
-                # День недоступен (выходной)
-                print(f"Сотрудник {employee_id} недоступен на дату {date_str} (выходной день)")
-                return False
-
-            # Переходим к следующему дню
+            if employee_manager.is_available(employee_id, date_str):
+                working_days += 1
+                if working_days >= duration:
+                    return True
             current_date += datetime.timedelta(days=1)
-
-        # Если все дни проверены и сотрудник доступен, возвращаем True
-        return True
 
     except Exception as e:
         print(f"Ошибка при проверке доступности сотрудника: {str(e)}")

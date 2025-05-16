@@ -257,85 +257,48 @@ def calculate_task_dates(sorted_tasks, graph, task_map, project_start_date, empl
 
 
 def calculate_dates_with_days_off(task, start_date_str, employee_id, employee_manager):
-    """
-    Вычисляет реальные даты начала и окончания задачи с учетом выходных дней сотрудника
+    # Конвертируем дату в объект datetime
+    start_date = datetime.datetime.strptime(start_date_str, '%Y-%m-%d')
 
-    Args:
-        task (dict): Задача
-        start_date_str (str): Дата начала
-        employee_id (int): ID сотрудника
-        employee_manager: Менеджер сотрудников
+    # Определяем длительность задачи в рабочих днях
+    duration = task.get('duration', 1)
 
-    Returns:
-        tuple: (start_date, end_date, calendar_duration) - дата начала, дата окончания и
-               календарная длительность в днях
-    """
-    try:
-        # Конвертируем дату в объект datetime
-        start_date = datetime.datetime.strptime(start_date_str, '%Y-%m-%d')
+    # Сначала найдем первый доступный рабочий день
+    first_day_found = False
+    current_date = start_date
+    calendar_days = 0
 
-        # Определяем длительность задачи в рабочих днях
-        duration = task.get('duration', 1)
+    while not first_day_found and calendar_days < duration * 3:
+        date_str = current_date.strftime('%Y-%m-%d')
+        if employee_manager.is_available(employee_id, date_str):
+            first_day_found = True
+            start_date = current_date
+        else:
+            current_date += datetime.timedelta(days=1)
+            calendar_days += 1
 
-        # Учитываем выходные дни
-        current_date = start_date
-        working_days = 0
-        calendar_days = 0
-
-        # Максимальное количество итераций для защиты от бесконечного цикла
-        max_iterations = duration * 3  # Берем с запасом
-
-        # Ищем первый рабочий день, начиная с даты начала
-        first_day_found = False
-
-        while not first_day_found and calendar_days < max_iterations:
-            date_str = current_date.strftime('%Y-%m-%d')
-            if employee_manager.is_available(employee_id, date_str):
-                first_day_found = True
-                start_date = current_date  # Обновляем дату начала
-            else:
-                current_date += datetime.timedelta(days=1)
-                calendar_days += 1
-
-        if not first_day_found:
-            print(f"Не удалось найти рабочий день для сотрудника {employee_id} в ближайшие {max_iterations} дней!")
-            return None, None, None
-
-        # Сбрасываем счетчик и перезапускаем с новой даты начала
-        calendar_days = 0
-        current_date = start_date
-
-        # Считаем все дни до набора нужного количества рабочих дней
-        while working_days < duration and calendar_days < max_iterations:
-            date_str = current_date.strftime('%Y-%m-%d')
-
-            if employee_manager.is_available(employee_id, date_str):
-                working_days += 1
-
-            if working_days < duration:  # Не увеличиваем для последнего дня
-                current_date += datetime.timedelta(days=1)
-                calendar_days += 1
-
-        if working_days < duration:
-            print(f"Не удалось набрать {duration} рабочих дней для сотрудника {employee_id}!")
-            return None, None, None
-
-        # Дата окончания - текущая дата
-        end_date = current_date
-
-        # Календарная длительность - разница между датами + 1 (включаем последний день)
-        actual_calendar_duration = (end_date - start_date).days + 1
-
-        return (
-            start_date.strftime('%Y-%m-%d'),
-            end_date.strftime('%Y-%m-%d'),
-            actual_calendar_duration
-        )
-
-    except Exception as e:
-        print(f"Ошибка при расчете дат с учетом выходных: {str(e)}")
+    # Если не найден первый рабочий день, возвращаем None
+    if not first_day_found:
         return None, None, None
 
+    # Теперь считаем, сколько дней нужно для выполнения задачи
+    working_days = 0
+    calendar_days = 0
+    current_date = start_date
+
+    while working_days < duration and calendar_days < duration * 3:
+        date_str = current_date.strftime('%Y-%m-%d')
+
+        if employee_manager.is_available(employee_id, date_str):
+            working_days += 1
+
+        calendar_days += 1
+        current_date += datetime.timedelta(days=1)
+
+    # Вычисляем конечную дату (предыдущий день)
+    end_date = current_date - datetime.timedelta(days=1)
+
+    return start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'), calendar_days
 
 def find_suitable_employee(task, start_date_str, position, employee_manager, workload):
     """
@@ -526,6 +489,10 @@ def schedule_project(project, tasks, task_manager, employee_manager):
     Returns:
         dict: Результаты планирования
     """
+    for task in tasks:
+        if task.get('employee_id'):
+            task['project_start_date'] = project['start_date']
+            adjust_task_duration_for_days_off(task, employee_manager)
     print(f"Начинаем планирование проекта '{project['name']}'...")
 
     # Шаг 1: Строим граф зависимостей
@@ -613,14 +580,17 @@ def update_database_assignments(task_dates, task_manager, employee_manager=None)
 
 def process_subtasks_for_groups(task_dates, task_manager, employee_manager=None):
     """
-    Обрабатывает подзадачи для групповых задач, назначая даты и сотрудников
+    Обрабатывает подзадачи для групповых задач, назначая даты и сотрудников с учетом выходных дней
 
     Args:
         task_dates (dict): Словарь с датами задач
         task_manager: Менеджер задач для работы с базой данных
         employee_manager: Менеджер сотрудников (опционально)
     """
-    global find_available_date
+    # Сначала импортируем все необходимые функции и модули
+    import datetime
+    from utils.employee_availability import check_employee_availability, find_available_date
+
     print("Обработка подзадач для групповых задач...")
 
     # Получаем список всех групповых задач с датами
@@ -641,138 +611,144 @@ def process_subtasks_for_groups(task_dates, task_manager, employee_manager=None)
         for employee in employees:
             employee_workload[employee['id']] = 0
 
+    # Вспомогательная функция для поиска доступного сотрудника
+    def find_and_assign_employee(subtask, start_dt, duration, position):
+        """Ищет доступного сотрудника на указанные даты с учетом выходных дней"""
+        assigned_employee_id = None
+        start_date = start_dt
+        end_date = start_dt + datetime.timedelta(days=duration - 1)
+
+        # Если должность указана и есть менеджер сотрудников
+        if position and employee_manager:
+            # Пытаемся найти подходящего сотрудника с учетом выходных дней
+            suitable_employees = employee_manager.get_employees_by_position(position)
+
+            if suitable_employees:
+                # Сначала пробуем найти сотрудника, у которого нет выходных в этот период
+                for employee in suitable_employees:
+                    is_available = check_employee_availability(
+                        employee['id'],
+                        start_dt.strftime('%Y-%m-%d'),
+                        duration,
+                        employee_manager
+                    )
+
+                    if is_available:
+                        # Нашли доступного сотрудника, выбираем с наименьшей загрузкой
+                        employee_load = employee_workload.get(employee['id'], 0)
+                        if assigned_employee_id is None or employee_load < employee_workload.get(assigned_employee_id,
+                                                                                                 0):
+                            assigned_employee_id = employee['id']
+
+                # Если не нашли доступного сотрудника, выбираем наименее загруженного
+                # и ищем для него подходящие даты
+                if not assigned_employee_id and suitable_employees:
+                    best_employee = min(suitable_employees, key=lambda e: employee_workload.get(e['id'], 0))
+                    assigned_employee_id = best_employee['id']
+
+                    # Ищем доступные даты с учетом выходных
+                    new_start, new_end = find_available_date(
+                        assigned_employee_id,
+                        start_dt.strftime('%Y-%m-%d'),
+                        duration,
+                        employee_manager
+                    )
+
+                    if new_start and new_end:
+                        # Обновляем даты начала и окончания
+                        start_date = datetime.datetime.strptime(new_start, '%Y-%m-%d')
+                        end_date = datetime.datetime.strptime(new_end, '%Y-%m-%d')
+                        print(
+                            f"Перенесли даты подзадачи {subtask['id']} на {new_start} - {new_end} для сотрудника {assigned_employee_id}")
+
+        # Если сотрудник уже назначен в базе данных, используем его
+        if subtask.get('employee_id'):
+            assigned_employee_id = subtask['employee_id']
+
+            # Проверяем доступность сотрудника с учетом выходных
+            if employee_manager:
+                is_available = check_employee_availability(
+                    assigned_employee_id,
+                    start_date.strftime('%Y-%m-%d'),
+                    duration,
+                    employee_manager
+                )
+
+                # Если сотрудник недоступен, ищем другие даты
+                if not is_available:
+                    new_start, new_end = find_available_date(
+                        assigned_employee_id,
+                        start_date.strftime('%Y-%m-%d'),
+                        duration,
+                        employee_manager
+                    )
+
+                    if new_start and new_end:
+                        start_date = datetime.datetime.strptime(new_start, '%Y-%m-%d')
+                        end_date = datetime.datetime.strptime(new_end, '%Y-%m-%d')
+                        print(f"Перенесли даты подзадачи {subtask['id']} на {new_start} - {new_end} из-за выходных")
+
+        # Обновляем загрузку назначенного сотрудника
+        if assigned_employee_id:
+            employee_workload[assigned_employee_id] = employee_workload.get(assigned_employee_id, 0) + duration
+
+        return assigned_employee_id, start_date, end_date
+
     # Обрабатываем каждую групповую задачу
     for group_id, group_data in group_tasks:
-        # Получаем подзадачи
-        subtasks = task_manager.get_subtasks(group_id)
-
-        if not subtasks:
-            continue
-
-        print(f"Обработка {len(subtasks)} подзадач для групповой задачи {group_id}")
-
-        group_start = group_data.get('start')
-        group_end = group_data.get('end')
-
-        # Стратегия распределения подзадач
-        # Если подзадача имеет флаг parallel=True, начинаем с даты начала групповой задачи
-        # Иначе распределяем подзадачи последовательно
-        import datetime
-
-        # Преобразуем строковые даты в объекты datetime
         try:
-            group_start_dt = datetime.datetime.strptime(group_start, '%Y-%m-%d')
-            group_end_dt = datetime.datetime.strptime(group_end, '%Y-%m-%d')
+            # Получаем подзадачи
+            subtasks = task_manager.get_subtasks(group_id)
 
-            # Находим подзадачи с назначенными сотрудниками
-            assigned_subtasks = [st for st in subtasks if st.get('employee_id')]
+            if not subtasks:
+                continue
 
-            # Если есть подзадачи с назначенными сотрудниками, используем их даты
-            if assigned_subtasks:
-                for subtask in assigned_subtasks:
-                    # Эти подзадачи уже обработаны основным алгоритмом
-                    continue
+            print(f"Обработка {len(subtasks)} подзадач для групповой задачи {group_id}")
+
+            # Преобразуем строковые даты в объекты datetime
+            group_start_dt = datetime.datetime.strptime(group_data.get('start'), '%Y-%m-%d')
+            group_end_dt = datetime.datetime.strptime(group_data.get('end'), '%Y-%m-%d')
+
+            # Пропускаем подзадачи, которые уже обработаны
+            already_processed = [st['id'] for st in subtasks if st['id'] in task_dates]
 
             # Обрабатываем параллельные подзадачи
-            parallel_subtasks = [st for st in subtasks if st.get('parallel')]
+            parallel_subtasks = [st for st in subtasks if st.get('parallel') and st['id'] not in already_processed]
             for subtask in parallel_subtasks:
                 subtask_id = subtask['id']
+                subtask_duration = subtask.get('duration', 1)
 
-                if subtask_id not in task_dates:  # Если подзадача еще не обработана
-                    # Устанавливаем даты в зависимости от длительности
-                    subtask_duration = subtask.get('duration', 1)
-                    subtask_start_dt = group_start_dt
-                    subtask_end_dt = min(group_end_dt, group_start_dt + datetime.timedelta(days=subtask_duration - 1))
+                # Начинаем с даты начала групповой задачи
+                subtask_start_dt = group_start_dt
 
-                    # Назначаем сотрудника для подзадачи
-                    assigned_employee_id = None
+                # Находим подходящего сотрудника и даты выполнения
+                assigned_employee_id, actual_start_dt, actual_end_dt = find_and_assign_employee(
+                    subtask,
+                    subtask_start_dt,
+                    subtask_duration,
+                    subtask.get('position')
+                )
 
-                    if employee_manager and subtask.get('position'):
-                        position = subtask.get('position')
+                # Проверяем, чтобы конечная дата не выходила за пределы групповой задачи
+                if actual_end_dt > group_end_dt:
+                    actual_end_dt = group_end_dt
 
-                        # Пытаемся найти подходящего сотрудника с учетом выходных дней
-                        assigned_employee_id = find_suitable_employee_with_days_off(
-                            position,
-                            subtask_start_dt.strftime('%Y-%m-%d'),
-                            subtask_duration,
-                            employee_manager,
-                            employee_workload
-                        )
-
-                        # Если не нашли подходящего сотрудника, но есть сотрудники с нужной должностью
-                        if not assigned_employee_id:
-                            suitable_employees = employee_manager.get_employees_by_position(position)
-                            if suitable_employees:
-                                # Выбираем сотрудника с наименьшей загрузкой
-                                best_employee = min(suitable_employees,
-                                                    key=lambda e: employee_workload.get(e['id'], 0))
-                                assigned_employee_id = best_employee['id']
-
-                                # Ищем подходящую дату с учетом выходных
-                                new_start, new_end = find_available_date(
-                                    assigned_employee_id,
-                                    subtask_start_dt.strftime('%Y-%m-%d'),
-                                    subtask_duration,
-                                    employee_manager
-                                )
-
-                                if new_start and new_end:
-                                    # Используем найденные доступные даты
-                                    subtask_start_dt = datetime.datetime.strptime(new_start, '%Y-%m-%d')
-                                    subtask_end_dt = datetime.datetime.strptime(new_end, '%Y-%m-%d')
-                                    print(
-                                        f"Перенесли даты подзадачи {subtask_id} на {new_start} - {new_end} для сотрудника {assigned_employee_id}")
-
-                    # Если сотрудник уже назначен, используем его
-                    if subtask.get('employee_id'):
-                        assigned_employee_id = subtask['employee_id']
-
-                        # Проверим, нет ли выходных в этот период
-                        if employee_manager:
-                            from employee_availability import check_employee_availability, find_available_date
-
-                            # Проверяем доступность
-                            is_available = check_employee_availability(
-                                assigned_employee_id,
-                                subtask_start_dt.strftime('%Y-%m-%d'),
-                                subtask_duration,
-                                employee_manager
-                            )
-
-                            # Если есть выходные, ищем новые даты
-                            if not is_available:
-                                new_start, new_end = find_available_date(
-                                    assigned_employee_id,
-                                    subtask_start_dt.strftime('%Y-%m-%d'),
-                                    subtask_duration,
-                                    employee_manager
-                                )
-
-                                if new_start and new_end:
-                                    # Используем найденные доступные даты
-                                    subtask_start_dt = datetime.datetime.strptime(new_start, '%Y-%m-%d')
-                                    subtask_end_dt = datetime.datetime.strptime(new_end, '%Y-%m-%d')
-                                    print(
-                                        f"Перенесли даты подзадачи {subtask_id} на {new_start} - {new_end} из-за выходных")
-
-                    # Обновляем даты и назначение в базе данных
-                    if assigned_employee_id:
-                        # Обновляем даты и назначенного сотрудника
-                        task_manager.db.execute(
-                            "UPDATE tasks SET start_date = ?, end_date = ?, employee_id = ? WHERE id = ?",
-                            (subtask_start_dt.strftime('%Y-%m-%d'), subtask_end_dt.strftime('%Y-%m-%d'),
-                             assigned_employee_id, subtask_id)
-                        )
-                        print(
-                            f"Обновлены даты и назначен сотрудник {assigned_employee_id} для параллельной подзадачи {subtask_id}")
-                    else:
-                        # Обновляем только даты
-                        task_manager.db.execute(
-                            "UPDATE tasks SET start_date = ?, end_date = ? WHERE id = ?",
-                            (subtask_start_dt.strftime('%Y-%m-%d'), subtask_end_dt.strftime('%Y-%m-%d'),
-                             subtask_id)
-                        )
-                        print(f"Обновлены даты для параллельной подзадачи {subtask_id} (сотрудник не назначен)")
+                # Обновляем даты и назначение в базе данных
+                if assigned_employee_id:
+                    task_manager.db.execute(
+                        "UPDATE tasks SET start_date = ?, end_date = ?, employee_id = ? WHERE id = ?",
+                        (actual_start_dt.strftime('%Y-%m-%d'), actual_end_dt.strftime('%Y-%m-%d'),
+                         assigned_employee_id, subtask_id)
+                    )
+                    print(
+                        f"Обновлены даты и назначен сотрудник {assigned_employee_id} для параллельной подзадачи {subtask_id}")
+                else:
+                    task_manager.db.execute(
+                        "UPDATE tasks SET start_date = ?, end_date = ? WHERE id = ?",
+                        (actual_start_dt.strftime('%Y-%m-%d'), actual_end_dt.strftime('%Y-%m-%d'),
+                         subtask_id)
+                    )
+                    print(f"Обновлены даты для параллельной подзадачи {subtask_id} (сотрудник не назначен)")
 
             # Обрабатываем последовательные подзадачи
             sequential_subtasks = [st for st in subtasks if not st.get('parallel')]
@@ -780,7 +756,6 @@ def process_subtasks_for_groups(task_dates, task_manager, employee_manager=None)
 
             for subtask in sequential_subtasks:
                 subtask_id = subtask['id']
-
                 if subtask_id not in task_dates:  # Если подзадача еще не обработана
                     # Устанавливаем даты в зависимости от длительности
                     subtask_duration = subtask.get('duration', 1)
@@ -796,8 +771,32 @@ def process_subtasks_for_groups(task_dates, task_manager, employee_manager=None)
 
                         if suitable_employees:
                             # Выбираем наименее загруженного сотрудника
-                            assigned_employee_id = min(suitable_employees,
-                                                       key=lambda e: employee_workload.get(e['id'], 0))['id']
+                            best_employee = min(suitable_employees, key=lambda e: employee_workload.get(e['id'], 0))
+                            assigned_employee_id = best_employee['id']
+
+                            # ВАЖНО! Проверяем доступность и корректируем даты
+                            is_available = check_employee_availability(
+                                assigned_employee_id,
+                                subtask_start.strftime('%Y-%m-%d'),
+                                subtask_duration,
+                                employee_manager
+                            )
+
+                            if not is_available:
+                                # Ищем доступные даты с учетом выходных
+                                new_start, new_end = find_available_date(
+                                    assigned_employee_id,
+                                    subtask_start.strftime('%Y-%m-%d'),
+                                    subtask_duration,
+                                    employee_manager
+                                )
+
+                                if new_start and new_end:
+                                    # ИСПРАВЛЕНО: Обновляем переменные, которые используются ниже
+                                    subtask_start = datetime.datetime.strptime(new_start, '%Y-%m-%d')
+                                    subtask_end = datetime.datetime.strptime(new_end, '%Y-%m-%d')
+                                    print(
+                                        f"Перенесли даты подзадачи {subtask_id} на {new_start}-{new_end} из-за выходных")
 
                             # Обновляем загрузку сотрудника
                             employee_workload[assigned_employee_id] = employee_workload.get(assigned_employee_id,
@@ -807,8 +806,34 @@ def process_subtasks_for_groups(task_dates, task_manager, employee_manager=None)
                     if subtask.get('employee_id'):
                         assigned_employee_id = subtask['employee_id']
 
+                        # Проверяем доступность с учетом выходных
+                        is_available = check_employee_availability(
+                            assigned_employee_id,
+                            subtask_start.strftime('%Y-%m-%d'),
+                            subtask_duration,
+                            employee_manager
+                        )
+
+                        if not is_available:
+                            print(f"Сотрудник {assigned_employee_id} недоступен на дату {subtask_start.strftime('%Y-%m-%d')}")
+                            # Ищем доступные даты
+                            new_start, new_end = find_available_date(
+                                assigned_employee_id,
+                                subtask_start.strftime('%Y-%m-%d'),
+                                subtask_duration,
+                                employee_manager
+                            )
+
+                            if new_start and new_end:
+                                print(f"Найдены новые даты: {new_start} - {new_end}")
+                                # ИСПРАВЛЕНО: Обновляем переменные subtask_start и subtask_end
+                                subtask_start = datetime.datetime.strptime(new_start, '%Y-%m-%d')
+                                subtask_end = datetime.datetime.strptime(new_end, '%Y-%m-%d')
+                                print(f"Перенесли даты подзадачи {subtask_id} на {new_start}-{new_end} из-за выходных")
+
                     # Обновляем даты и назначение в базе данных
                     if assigned_employee_id:
+                        employee_workload[assigned_employee_id] = employee_workload.get(assigned_employee_id, 0) + subtask_duration
                         # Обновляем даты и назначенного сотрудника
                         task_manager.db.execute(
                             "UPDATE tasks SET start_date = ?, end_date = ?, employee_id = ? WHERE id = ?",
@@ -825,9 +850,54 @@ def process_subtasks_for_groups(task_dates, task_manager, employee_manager=None)
                         )
                         print(f"Обновлены даты для последовательной подзадачи {subtask_id} (сотрудник не назначен)")
 
-                    # Переходим к следующей дате
+                    # Переходим к следующей дате - ВАЖНО использовать актуальную дату окончания
                     current_date = subtask_end + datetime.timedelta(days=1)
 
         except Exception as e:
             print(f"Ошибка при обработке подзадач для групповой задачи {group_id}: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
 
+def adjust_task_duration_for_days_off(task, employee_manager):
+    """
+    Корректирует длительность задачи с учетом выходных дней сотрудника
+    """
+    try:
+        employee_id = task.get('employee_id')
+        if not employee_id:
+            return
+
+        original_duration = task.get('duration', 0)
+        if not original_duration:
+            return
+
+        # Предполагаем начало с даты проекта
+        from datetime import datetime, timedelta
+        project_start_date = datetime.strptime(task.get('project_start_date', '2025-01-01'), '%Y-%m-%d')
+
+        # Рассчитываем, сколько календарных дней потребуется для выполнения задачи
+        calendar_days = 0
+        working_days = 0
+        current_date = project_start_date
+
+        while working_days < original_duration and calendar_days < 100:  # Защита от бесконечного цикла
+            calendar_days += 1
+            date_str = current_date.strftime('%Y-%m-%d')
+
+            if employee_manager.is_available(employee_id, date_str):
+                working_days += 1
+
+            current_date += timedelta(days=1)
+
+        # Обновляем длительность задачи
+        if calendar_days > original_duration:
+            print(f"Задача '{task.get('name', 'Неизвестная')}' (ID: {task.get('id', 'Неизвестный')}): "
+                  f"календарная длительность скорректирована с {original_duration} до {calendar_days} дней")
+            task['adjusted_duration'] = calendar_days
+
+            # Возвращаем скорректированные данные
+            return calendar_days, original_duration  # calendar_duration, working_duration
+    except Exception as e:
+        print(f"Ошибка при корректировке длительности задачи {task.get('name', 'Unknown')}: {str(e)}")
+
+    return None

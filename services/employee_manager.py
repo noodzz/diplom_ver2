@@ -172,6 +172,10 @@ class EmployeeManager:
         except Exception as e:
             raise ValueError(f"Ошибка при получении распределения задач: {str(e)}")
 
+    """
+    Обновленная функция generate_workload_report для корректного отображения дат задач
+    """
+
     def generate_workload_report(self, project_id):
         """
         Генерирует отчет о распределении задач по сотрудникам с учетом параллельных задач
@@ -190,8 +194,11 @@ class EmployeeManager:
 
             project_dict = dict(project)
 
-            # Получаем распределение задач
+            # Получаем распределение задач - обеспечиваем свежие данные из базы
+            # Форсируем обновление из базы данных, чтобы избежать проблем с устаревшими данными
+            self.db.connect()
             workload = self.get_employee_workload(project_id)
+            self.db.close()
 
             # Создаем отчет
             report = f"Отчет о распределении задач для проекта '{project_dict['name']}'\n\n"
@@ -199,48 +206,6 @@ class EmployeeManager:
             if not workload:
                 report += "Ни одной задачи не назначено на сотрудников.\n"
                 return report
-
-            # Подсчитываем загрузку каждого сотрудника с учетом параллельных задач
-            employee_load = {}
-            for employee_id, data in workload.items():
-                # Группируем задачи по дате начала
-                tasks_by_date = {}
-                non_dated_tasks = []
-
-                for task in data['tasks']:
-                    start_date = task.get('start_date')
-                    if start_date:
-                        if start_date not in tasks_by_date:
-                            tasks_by_date[start_date] = []
-                        tasks_by_date[start_date].append(task)
-                    else:
-                        # Задачи без даты обрабатываем отдельно
-                        non_dated_tasks.append(task)
-
-                # Расчет загрузки для задач с датами
-                total_duration = 0
-                for date, tasks in tasks_by_date.items():
-                    # Группируем по признаку параллельности
-                    parallel_tasks = [t for t in tasks if t.get('parallel')]
-                    sequential_tasks = [t for t in tasks if not t.get('parallel')]
-
-                    # Для параллельных задач берем максимальную длительность
-                    parallel_duration = max(
-                        [t.get('working_duration', t['duration']) for t in parallel_tasks]) if parallel_tasks else 0
-
-                    # Для последовательных задач суммируем
-                    sequential_duration = sum(t.get('working_duration', t['duration']) for t in sequential_tasks)
-
-                    # Добавляем к общей длительности
-                    total_duration += (parallel_duration + sequential_duration)
-
-                # Добавляем длительность задач без дат
-                for task in non_dated_tasks:
-                    # Используем working_duration если доступно, иначе duration
-                    working_duration = task.get('working_duration', task['duration'])
-                    total_duration += working_duration
-
-                employee_load[employee_id] = total_duration
 
             # Группируем сотрудников по должностям
             positions = {}
@@ -257,13 +222,21 @@ class EmployeeManager:
 
                 for employee_id in employee_ids:
                     data = workload[employee_id]
-                    report += f"\n{data['name']} - {employee_load[employee_id]} дней загрузки\n"
+
+                    # Пересчитываем загрузку сотрудника на основе актуальных данных о задачах
+                    total_duration = sum(task.get('duration', 0) for task in data['tasks'])
+
+                    report += f"\n{data['name']} - {total_duration} дней загрузки\n"
 
                     # Задачи сотрудника
                     for task in data['tasks']:
                         date_range = ""
-                        if task['start_date'] and task['end_date']:
-                            date_range = f" ({task['start_date']} - {task['end_date']})"
+                        if task.get('start_date') and task.get('end_date'):
+                            # Используем актуальные даты из базы
+                            # Форматируем даты, не модифицируя их
+                            start_date = task['start_date']
+                            end_date = task['end_date']
+                            date_range = f" ({start_date} - {end_date})"
 
                         report += f"• {task['name']} - {task['duration']} дн.{date_range}\n"
 

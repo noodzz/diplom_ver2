@@ -1,128 +1,158 @@
-def check_employee_availability(employee_id, start_date, duration, employee_manager):
+"""
+Функции для работы с доступностью сотрудников с учетом выходных дней.
+"""
+import datetime
+
+
+def is_available_on_date(employee_id, date_str, employee_manager):
     """
-    Проверяет доступность сотрудника на указанный период с учетом выходных дней
+    Проверяет, доступен ли сотрудник в указанную дату (не выходной)
 
     Args:
         employee_id (int): ID сотрудника
-        start_date (str): Дата начала в формате 'YYYY-MM-DD'
-        duration (int): Длительность задачи в днях
+        date_str (str): Дата в формате 'YYYY-MM-DD'
         employee_manager: Менеджер сотрудников
 
     Returns:
-        bool: True, если сотрудник доступен на все дни периода, False в противном случае
+        bool: True если сотрудник доступен, False если это выходной
     """
-    import datetime
-
     try:
-        # Преобразуем дату начала в объект datetime
-        current_date = datetime.datetime.strptime(start_date, '%Y-%m-%d')
-        working_days = 0
-        # Проверяем каждый день
-        for i in range(duration * 2):  # Проверяем с запасом
-            date_str = current_date.strftime('%Y-%m-%d')
-            if employee_manager.is_available(employee_id, date_str):
-                working_days += 1
-                if working_days >= duration:
-                    return True
-            current_date += datetime.timedelta(days=1)
-
+        is_available = employee_manager.is_available(employee_id, date_str)
+        return is_available
     except Exception as e:
-        print(f"Ошибка при проверке доступности сотрудника: {str(e)}")
+        print(f"Ошибка при проверке доступности сотрудника {employee_id} на дату {date_str}: {str(e)}")
         return False
 
 
-def find_suitable_employee_with_days_off(position, start_date, duration, employee_manager, employee_workload):
+def get_available_dates_for_task(employee_id, start_date_str, duration, employee_manager):
     """
-    Находит подходящего сотрудника с учетом его выходных дней
+    Находит подходящие даты для задачи с учетом выходных дней сотрудника
+
+    Args:
+        employee_id (int): ID сотрудника
+        start_date_str (str): Предполагаемая дата начала в формате 'YYYY-MM-DD'
+        duration (int): Длительность задачи в рабочих днях
+        employee_manager: Менеджер сотрудников
+
+    Returns:
+        tuple: (start_date, end_date, calendar_duration) в формате YYYY-MM-DD или (None, None, None) в случае ошибки
+    """
+    try:
+        # Преобразуем дату начала в объект datetime
+        start_date = datetime.datetime.strptime(start_date_str, '%Y-%m-%d')
+
+        # Ищем первый доступный день, начиная с даты начала
+        current_date = start_date
+        max_search_days = 30  # Ограничиваем поиск
+
+        # Ищем первый рабочий день
+        for _ in range(max_search_days):
+            date_str = current_date.strftime('%Y-%m-%d')
+            if is_available_on_date(employee_id, date_str, employee_manager):
+                # Нашли первый рабочий день
+                first_working_day = current_date
+                break
+            current_date += datetime.timedelta(days=1)
+        else:
+            # Не нашли рабочий день в течение max_search_days
+            print(f"Не найден рабочий день для сотрудника {employee_id} в течение {max_search_days} дней")
+            return None, None, None
+
+        # Отсчитываем нужное количество рабочих дней для задачи
+        current_date = first_working_day
+        working_days_found = 0
+        calendar_days = 0
+
+        while working_days_found < duration and calendar_days < max_search_days * 2:
+            date_str = current_date.strftime('%Y-%m-%d')
+            calendar_days += 1
+
+            if is_available_on_date(employee_id, date_str, employee_manager):
+                working_days_found += 1
+                last_working_day = current_date
+
+            current_date += datetime.timedelta(days=1)
+
+            if calendar_days >= max_search_days * 2:
+                print(f"Превышено максимальное количество дней поиска для сотрудника {employee_id}")
+                return None, None, None
+
+        return (
+            first_working_day.strftime('%Y-%m-%d'),
+            last_working_day.strftime('%Y-%m-%d'),
+            calendar_days
+        )
+
+    except Exception as e:
+        print(f"Ошибка при поиске дат для сотрудника {employee_id}: {str(e)}")
+        return None, None, None
+
+
+def find_suitable_employee(position, start_date, duration, employee_manager, employee_workload=None):
+    """
+    Находит подходящего сотрудника для задачи с учетом выходных дней
 
     Args:
         position (str): Требуемая должность
         start_date (str): Дата начала задачи
-        duration (int): Длительность задачи в днях
+        duration (int): Длительность задачи в рабочих днях
         employee_manager: Менеджер сотрудников
-        employee_workload (dict): Словарь текущей загрузки сотрудников
+        employee_workload (dict): Словарь текущей загрузки сотрудников (employee_id -> рабочих дней)
 
     Returns:
-        int: ID подходящего сотрудника или None, если не найден
+        tuple: (employee_id, start_date, end_date, calendar_duration) или (None, None, None, None) в случае ошибки
     """
-    # Получаем список сотрудников требуемой должности
-    suitable_employees = employee_manager.get_employees_by_position(position)
-
-    if not suitable_employees:
-        print(f"Не найдены сотрудники с должностью '{position}'")
-        return None
-
-    # Отфильтровываем сотрудников, у которых в этот период нет выходных
-    available_employees = []
-
-    for employee in suitable_employees:
-        if check_employee_availability(employee['id'], start_date, duration, employee_manager):
-            available_employees.append(employee)
-
-    if not available_employees:
-        print(f"Не найдены доступные сотрудники с должностью '{position}' на период с {start_date} на {duration} дней")
-        return None
-
-    # Выбираем наименее загруженного сотрудника из доступных
-    best_employee = min(available_employees, key=lambda e: employee_workload.get(e['id'], 0))
-    employee_workload[best_employee['id']] = employee_workload.get(best_employee['id'], 0) + duration
-
-    print(
-        f"Выбран сотрудник {best_employee['name']} (ID: {best_employee['id']}) с загрузкой {employee_workload[best_employee['id']]} дней")
-    return best_employee['id']
-
-
-def find_available_date(employee_id, start_date, duration, employee_manager):
-    """
-    Находит ближайшую доступную дату для сотрудника с учетом выходных
-
-    Args:
-        employee_id (int): ID сотрудника
-        start_date (str): Предполагаемая дата начала
-        duration (int): Длительность задачи в днях
-        employee_manager: Менеджер сотрудников
-
-    Returns:
-        tuple: (start_date, end_date) - новая дата начала и окончания или (None, None), если не найдена
-    """
-    import datetime
-
-    # Максимальное количество дней для поиска
-    max_days = 30
-
     try:
-        current_date = datetime.datetime.strptime(start_date, '%Y-%m-%d')
-        end_date = current_date
+        # Получаем список сотрудников с указанной должностью
+        suitable_employees = employee_manager.get_employees_by_position(position)
 
-        # Ищем период без выходных дней достаточной длительности
-        for _ in range(max_days):
-            # Проверяем текущую дату как потенциальное начало
-            found_period = True
-            test_date = current_date
-            working_days = 0
+        if not suitable_employees:
+            print(f"Не найдены сотрудники с должностью '{position}'")
+            return None, None, None, None
 
-            while working_days < duration:
-                date_str = test_date.strftime('%Y-%m-%d')
+        # Если workload не предоставлен, инициализируем пустой словарь
+        if employee_workload is None:
+            employee_workload = {}
 
-                if not employee_manager.is_available(employee_id, date_str):
-                    # Если встретили выходной, сдвигаем текущую дату и пробуем снова
-                    found_period = False
-                    break
+        # Ищем наиболее подходящего сотрудника
+        best_employee_id = None
+        best_start_date = None
+        best_end_date = None
+        best_calendar_duration = float('inf')
+        best_workload = float('inf')
 
-                # Увеличиваем счетчик рабочих дней
-                working_days += 1
-                end_date = test_date
-                test_date += datetime.timedelta(days=1)
+        for employee in suitable_employees:
+            employee_id = employee['id']
 
-            if found_period:
-                return current_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
+            # Получаем возможные даты выполнения задачи для данного сотрудника
+            task_start, task_end, calendar_duration = get_available_dates_for_task(
+                employee_id, start_date, duration, employee_manager
+            )
 
-            # Сдвигаем текущую дату на один день вперед
-            current_date += datetime.timedelta(days=1)
+            if task_start and task_end:
+                # Учитываем текущую загрузку сотрудника
+                current_workload = employee_workload.get(employee_id, 0)
 
-        print(f"Не удалось найти доступный период для сотрудника {employee_id} в течение {max_days} дней")
-        return None, None
+                # Выбираем сотрудника с минимальной загрузкой
+                # или с минимальной календарной длительностью при равной загрузке
+                if (best_employee_id is None or
+                        current_workload < best_workload or
+                        (current_workload == best_workload and calendar_duration < best_calendar_duration)):
+                    best_employee_id = employee_id
+                    best_start_date = task_start
+                    best_end_date = task_end
+                    best_calendar_duration = calendar_duration
+                    best_workload = current_workload
+
+        if best_employee_id:
+            # Обновляем загрузку выбранного сотрудника
+            employee_workload[best_employee_id] = employee_workload.get(best_employee_id, 0) + duration
+
+            return best_employee_id, best_start_date, best_end_date, best_calendar_duration
+        else:
+            print(f"Не удалось найти подходящего сотрудника для должности '{position}' на период с {start_date}")
+            return None, None, None, None
 
     except Exception as e:
-        print(f"Ошибка при поиске доступной даты: {str(e)}")
-        return None, None
+        print(f"Ошибка при поиске подходящего сотрудника: {str(e)}")
+        return None, None, None, None

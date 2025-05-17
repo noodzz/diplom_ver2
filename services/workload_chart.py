@@ -1,8 +1,8 @@
-import matplotlib.pyplot as plt
-import numpy as np
-import tempfile
 import os
-from datetime import datetime, timedelta
+import tempfile
+
+import numpy as np
+from matplotlib import pyplot as plt
 
 
 class WorkloadChart:
@@ -40,6 +40,9 @@ class WorkloadChart:
                 positions[position] = []
             positions[position].append(employee_id)
 
+        # Печатаем отладочную информацию
+        print(f"Создание диаграммы загрузки для {len(employee_workload)} сотрудников")
+
         # Создаем фигуру
         fig_height = max(8, len(employee_workload) * 0.7)
         fig, ax = plt.subplots(figsize=(12, fig_height))
@@ -53,7 +56,7 @@ class WorkloadChart:
         position_colors = {
             "Проектный менеджер": "tab:blue",
             "Технический специалист": "tab:orange",
-            "Старший тех. специалист": "tab:green",
+            "Старший технический специалист": "tab:green",
             "Руководитель настройки": "tab:red",
             "Младший специалист": "tab:purple",
             "Старший специалист": "tab:brown",
@@ -62,11 +65,18 @@ class WorkloadChart:
 
         # Заполняем данные для графика
         for position, employee_ids in positions.items():
-            for employee_id in employee_ids:
+            # Сортируем сотрудников по нагрузке (от большей к меньшей)
+            sorted_employees = sorted(
+                employee_ids,
+                key=lambda emp_id: sum(task.get('duration', 0) for task in employee_workload[emp_id].get('tasks', [])),
+                reverse=True
+            )
+
+            for employee_id in sorted_employees:
                 data = employee_workload[employee_id]
 
                 # Рассчитываем общую продолжительность задач
-                total_duration = sum(task['duration'] for task in data['tasks'])
+                total_duration = sum(task.get('duration', 0) for task in data.get('tasks', []))
 
                 employee_names.append(f"{data['name']} ({position})")
                 employee_durations.append(total_duration)
@@ -74,7 +84,7 @@ class WorkloadChart:
 
         # Создаем горизонтальную столбчатую диаграмму
         y_pos = np.arange(len(employee_names))
-        ax.barh(y_pos, employee_durations, align='center', color=colors, alpha=0.8)
+        bars = ax.barh(y_pos, employee_durations, align='center', color=colors, alpha=0.8)
 
         # Настраиваем оси
         ax.set_yticks(y_pos)
@@ -92,9 +102,21 @@ class WorkloadChart:
         # Добавляем среднюю нагрузку
         if employee_durations:
             avg_duration = sum(employee_durations) / len(employee_durations)
-            ax.axvline(x=avg_duration, color='r', linestyle='--', alpha=0.7)
-            ax.text(avg_duration + 0.5, len(employee_names) - 0.5,
-                    f"Средняя нагрузка: {avg_duration:.1f} дней", va='top', ha='left', color='r')
+            # Округляем среднюю нагрузку до 1 десятичного знака
+            avg_duration_text = f"{avg_duration:.1f}"
+
+            # Чертим линию средней нагрузки
+            avg_line = ax.axvline(x=avg_duration, color='r', linestyle='--', alpha=0.7)
+
+            # Добавляем подпись для средней нагрузки
+            ax.text(
+                avg_duration + 0.5,
+                len(employee_names) - 0.5,
+                f"Средняя нагрузка: {avg_duration_text} дней",
+                va='top',
+                ha='left',
+                color='r'
+            )
 
         plt.tight_layout()
 

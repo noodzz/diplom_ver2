@@ -25,7 +25,7 @@ from services.network_model import NetworkModel
 from services.gantt_chart import GanttChart
 from services.workload_chart import WorkloadChart
 from utils.helpers import parse_csv, format_date, is_authorized, is_admin
-from utils.scheduler import schedule_project, update_database_assignments
+from utils.scheduler import schedule_project, update_database_assignments, balance_employee_workload
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=os.getenv("BOT_TOKEN"))
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
+
+test_mode_active = False
+original_employees_data = None
 
 # Инициализация менеджеров
 db_manager = DatabaseManager()
@@ -707,14 +710,32 @@ async def calculate_schedule(callback: CallbackQuery):
         project = project_manager.get_project_details(project_id)
         tasks = task_manager.get_tasks_by_project(project_id)
 
-        # Импортируем новые функции планирования
-        from utils.scheduler import schedule_project, update_database_assignments
+        # Дополнительно получаем все задачи проекта, включая подзадачи
+        all_tasks = task_manager.get_all_tasks_by_project(project_id)
+        print(f"Получено {len(tasks)} основных задач и {len(all_tasks)} задач всего (включая подзадачи)")
 
         # Выполняем расчет календарного плана с учетом выходных дней
         result = schedule_project(project, tasks, task_manager, employee_manager)
 
-        # Обновляем назначения и даты в базе данных
-        update_database_assignments(result['task_dates'], task_manager, employee_manager)
+        # Создаем словарь задач для передачи в функцию балансировки
+        task_map = {}
+        for task in all_tasks:  # Используем все задачи, включая подзадачи
+            task_id = task['id']
+            task_map[task_id] = task
+            # Также добавляем строковое представление ID
+            task_map[str(task_id)] = task
+
+        print(f"Создан словарь task_map с {len(task_map)} задачами")
+
+        # Балансируем нагрузку между сотрудниками
+        balanced_task_dates = balance_employee_workload(result['task_dates'], task_map, employee_manager)
+
+        # Обновляем результаты с учетом балансировки
+        result['task_dates'] = balanced_task_dates
+
+        # Обновляем назначения и даты в базе данных с улучшенной функцией
+        update_result = update_database_assignments(result['task_dates'], task_manager, employee_manager)
+        print(f"Обновлено {update_result} записей в базе данных")
 
         # Формируем результаты для отображения
         task_dates = result['task_dates']
@@ -745,6 +766,8 @@ async def calculate_schedule(callback: CallbackQuery):
             has_gantt = True
         except Exception as e:
             print(f"Ошибка при создании диаграммы Ганта: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
             gantt_image = None
             has_gantt = False
 
@@ -796,7 +819,6 @@ async def calculate_schedule(callback: CallbackQuery):
         await callback.message.edit_text(f"Ошибка при расчете календарного плана: {str(e)}")
         return
 
-
 def generate_planning_report(project, tasks, result, task_manager, employee_manager):
     """
     Генерирует отчет о результатах планирования
@@ -811,17 +833,22 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
     Returns:
         str: Текст отчета
     """
+    import datetime
+
     task_dates = result['task_dates']
     critical_path = result['critical_path']
     duration = result['duration']
-
-    from datetime import datetime
 
     # Заголовок отчета
     text = f"📊 ОТЧЕТ ПО КАЛЕНДАРНОМУ ПЛАНУ\n"
     text += f"=============================================\n\n"
     text += f"📋 ОБЩАЯ ИНФОРМАЦИЯ О ПРОЕКТЕ\n"
     text += f"Название проекта: '{project['name']}'\n"
+
+    # Вывод диагностической информации
+    print(f"Генерация отчета для проекта {project['name']}")
+    print(f"Данные задач: {len(tasks)} задач")
+    print(f"Данные дат: {len(task_dates)} записей")
 
     # Вычисляем фактическую длительность проекта
     if task_dates:
@@ -831,9 +858,9 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
 
         for dates in task_dates.values():
             if 'start' in dates:
-                start_dates.append(datetime.strptime(dates['start'], '%Y-%m-%d'))
+                start_dates.append(datetime.datetime.strptime(dates['start'], '%Y-%m-%d'))
             if 'end' in dates:
-                end_dates.append(datetime.strptime(dates['end'], '%Y-%m-%d'))
+                end_dates.append(datetime.datetime.strptime(dates['end'], '%Y-%m-%d'))
 
         if start_dates and end_dates:
             project_start = min(start_dates)
@@ -861,7 +888,13 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
 
         for task_id in critical_path:
             try:
-                task = task_manager.get_task(task_id)
+                # Пробуем и с числовым, и со строковым ID
+                task = None
+                if isinstance(task_id, str) and task_id.isdigit():
+                    task = task_manager.get_task(int(task_id))
+                else:
+                    task = task_manager.get_task(task_id)
+
                 if task:
                     critical_tasks.append(task)
                     total_critical_days += task.get('duration', 0)
@@ -869,18 +902,34 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
                     # Форматируем даты для отображения
                     start_date = "?"
                     end_date = "?"
+
+                    # Пробуем разные варианты ключей для task_dates
                     if task_id in task_dates:
                         if 'start' in task_dates[task_id]:
                             start_date = format_date(task_dates[task_id]['start'])
                         if 'end' in task_dates[task_id]:
                             end_date = format_date(task_dates[task_id]['end'])
+                    elif str(task_id) in task_dates:
+                        if 'start' in task_dates[str(task_id)]:
+                            start_date = format_date(task_dates[str(task_id)]['start'])
+                        if 'end' in task_dates[str(task_id)]:
+                            end_date = format_date(task_dates[str(task_id)]['end'])
+                    elif task.get('start_date') and task.get('end_date'):
+                        # Используем даты из задачи, если они есть
+                        start_date = format_date(task['start_date'])
+                        end_date = format_date(task['end_date'])
 
                     # Добавляем информацию о задаче
                     text += f"• {task['name']} ({task.get('duration', 0)} дн.)\n"
                     text += f"  Даты: {start_date} - {end_date}\n"
 
                     # Добавляем информацию о сотруднике, если назначен
-                    employee_id = task.get('employee_id') or task_dates.get(task_id, {}).get('employee_id')
+                    employee_id = task.get('employee_id')
+                    if not employee_id and task_id in task_dates:
+                        employee_id = task_dates[task_id].get('employee_id')
+                    elif not employee_id and str(task_id) in task_dates:
+                        employee_id = task_dates[str(task_id)].get('employee_id')
+
                     if employee_id:
                         try:
                             employee = employee_manager.get_employee(employee_id)
@@ -913,14 +962,34 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
     # Группируем задачи по сотрудникам
     employees_tasks = {}
     for task_id, dates in task_dates.items():
-        employee_id = dates.get('employee_id') or task_manager.get_task(task_id).get('employee_id')
+        # Определяем ID сотрудника
+        employee_id = None
+        if 'employee_id' in dates:
+            employee_id = dates['employee_id']
+
+        # Если ID сотрудника не в dates, пытаемся получить его из task
+        if not employee_id:
+            # Конвертируем task_id в числовой формат, если необходимо
+            try:
+                numeric_task_id = int(task_id) if isinstance(task_id, str) else task_id
+                task = task_manager.get_task(numeric_task_id)
+                if task and 'employee_id' in task:
+                    employee_id = task['employee_id']
+            except Exception as e:
+                print(f"Ошибка при получении задачи {task_id}: {str(e)}")
+
         if employee_id:
             if employee_id not in employees_tasks:
                 employees_tasks[employee_id] = []
 
-            task = task_manager.get_task(task_id)
-            if task:
-                employees_tasks[employee_id].append(task)
+            try:
+                # Получаем задачу по ID
+                numeric_task_id = int(task_id) if isinstance(task_id, str) else task_id
+                task = task_manager.get_task(numeric_task_id)
+                if task:
+                    employees_tasks[employee_id].append(task)
+            except Exception as e:
+                print(f"Ошибка при получении задачи {task_id}: {str(e)}")
 
     if employees_tasks:
         # Для каждого сотрудника выводим его задачи
@@ -932,7 +1001,10 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
                 # Сортируем задачи по датам
                 sorted_tasks = sorted(
                     emp_tasks,
-                    key=lambda t: task_dates.get(t['id'], {}).get('start', '9999-12-31')
+                    key=lambda t: task_dates.get(str(t['id']), {}).get('start', '9999-12-31') if str(
+                        t['id']) in task_dates else
+                    task_dates.get(t['id'], {}).get('start', '9999-12-31') if t['id'] in task_dates else
+                    t.get('start_date', '9999-12-31')
                 )
 
                 total_load = 0
@@ -940,11 +1012,22 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
                     # Получаем даты задачи
                     start_date = "?"
                     end_date = "?"
+
+                    # Ищем даты в разных источниках
                     if task['id'] in task_dates:
                         if 'start' in task_dates[task['id']]:
                             start_date = format_date(task_dates[task['id']]['start'])
                         if 'end' in task_dates[task['id']]:
                             end_date = format_date(task_dates[task['id']]['end'])
+                    elif str(task['id']) in task_dates:
+                        if 'start' in task_dates[str(task['id'])]:
+                            start_date = format_date(task_dates[str(task['id'])]['start'])
+                        if 'end' in task_dates[str(task['id'])]:
+                            end_date = format_date(task_dates[str(task['id'])]['end'])
+                    elif task.get('start_date') and task.get('end_date'):
+                        # Используем даты из задачи
+                        start_date = format_date(task['start_date'])
+                        end_date = format_date(task['end_date'])
 
                     # Выводим информацию о задаче
                     task_duration = task.get('duration', 0)
@@ -952,9 +1035,13 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
 
                     if task.get('parent_id'):
                         # Для подзадач показываем родительскую задачу
-                        parent_task = task_manager.get_task(task['parent_id'])
-                        parent_name = parent_task['name'] if parent_task else "Неизвестная задача"
-                        text += f"  • {parent_name} → {task['name']} ({task_duration} дн.)\n"
+                        try:
+                            parent_task = task_manager.get_task(task['parent_id'])
+                            parent_name = parent_task['name'] if parent_task else "Неизвестная задача"
+                            text += f"  • {parent_name} → {task['name']} ({task_duration} дн.)\n"
+                        except Exception as e:
+                            print(f"Ошибка при получении родительской задачи {task['parent_id']}: {str(e)}")
+                            text += f"  • {task['name']} ({task_duration} дн.)\n"
                     else:
                         text += f"  • {task['name']} ({task_duration} дн.)\n"
 
@@ -980,10 +1067,32 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
 
     # Подпись
     text += f"=============================================\n"
-    text += f"Отчет сгенерирован {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
+    text += f"Отчет сгенерирован {datetime.datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
     text += f"Система автоматизированного календарного планирования"
 
     return text
+
+
+# Вспомогательная функция для форматирования даты
+def format_date(date_str):
+    """
+    Форматирует дату для отображения
+
+    Args:
+        date_str (str): Дата в формате YYYY-MM-DD
+
+    Returns:
+        str: Отформатированная дата (DD.MM.YYYY)
+    """
+    if not date_str:
+        return "Не указана"
+
+    try:
+        import datetime
+        date = datetime.datetime.strptime(date_str, '%Y-%m-%d')
+        return date.strftime('%d.%m.%Y')
+    except ValueError:
+        return date_str
 
 def assign_task_with_days_off(task, project_start_date, employee_manager, suitable_employees, employee_workload):
     """
@@ -1291,6 +1400,18 @@ async def show_workload_report(callback, project_id, employee_manager, project, 
         task_manager: Менеджер задач
     """
     try:
+        # Выводим диагностическую информацию о задачах в проекте
+        print(f"Показ отчета о распределении для проекта {project_id}: {project['name']}")
+
+        # Получаем все задачи проекта из базы данных
+        all_tasks = task_manager.get_all_tasks_by_project(project_id)
+        print(f"Всего задач в проекте: {len(all_tasks)}")
+
+        # Для диагностики выводим информацию о датах задач
+        for task in all_tasks:
+            print(
+                f"Задача {task['id']}: {task['name']} - даты из БД: {task.get('start_date', 'Н/Д')} - {task.get('end_date', 'Н/Д')}")
+
         # Генерируем отчет о распределении задач
         report = employee_manager.generate_workload_report(project_id)
 
@@ -1303,6 +1424,9 @@ async def show_workload_report(callback, project_id, employee_manager, project, 
             await callback.message.edit_text(report, reply_markup=markup)
         else:
             # Если отчет слишком длинный, сохраняем его в файл и отправляем как документ
+            import tempfile
+            import os
+
             temp_dir = tempfile.mkdtemp()
 
             # Создаем безопасное имя файла
@@ -1322,6 +1446,7 @@ async def show_workload_report(callback, project_id, employee_manager, project, 
             )
 
             # Отправляем файл с отчетом
+            from aiogram.types import FSInputFile
             file = FSInputFile(file_path)
             await callback.message.answer_document(
                 file,
@@ -1344,14 +1469,32 @@ async def show_workload_report(callback, project_id, employee_manager, project, 
 
         # Генерируем и отправляем диаграмму загрузки сотрудников
         workload_data = employee_manager.get_employee_workload(project_id)
+
+        print(f"Создание диаграммы загрузки сотрудников для {len(workload_data)} сотрудников")
+
+        # Выводим детализацию для отладки
+        for emp_id, data in workload_data.items():
+            print(f"Сотрудник {emp_id}: {data.get('name', 'Без имени')} - {len(data.get('tasks', []))} задач")
+            for task in data.get('tasks', []):
+                print(
+                    f"  Задача: {task.get('id', 'ID?')}: {task.get('name', 'Без имени')} - {task.get('start_date', 'Н/Д')} - {task.get('end_date', 'Н/Д')}")
+
         if workload_chart and workload_data:
-            workload_image = workload_chart.generate(project, workload_data)
-            if os.path.exists(workload_image):
-                workload_file = FSInputFile(workload_image)
-                await callback.message.answer_photo(
-                    workload_file,
-                    caption=f"Диаграмма загрузки сотрудников для проекта '{project['name']}'"
-                )
+            try:
+                workload_image = workload_chart.generate(project, workload_data)
+                if os.path.exists(workload_image):
+                    workload_file = FSInputFile(workload_image)
+                    await callback.message.answer_photo(
+                        workload_file,
+                        caption=f"Диаграмма загрузки сотрудников для проекта '{project['name']}'"
+                    )
+                    print(f"Диаграмма загрузки успешно создана и отправлена")
+                else:
+                    print(f"Ошибка: файл диаграммы загрузки не найден по пути: {workload_image}")
+            except Exception as e:
+                print(f"Ошибка при создании диаграммы загрузки: {str(e)}")
+                import traceback
+                print(traceback.format_exc())
 
     except Exception as e:
         import traceback
@@ -1652,6 +1795,104 @@ async def unassign_employee(callback: CallbackQuery):
 # -----------------------------------------------------------------------------
 # Запуск бота
 # -----------------------------------------------------------------------------
+
+@router.message(Command("test_mode"))
+async def cmd_test_mode(message: Message):
+    """
+    Включает тестовый режим без учета выходных дней для проверки календарного плана.
+
+    Это временное отключение выходных дней у всех сотрудников для сравнения
+    расчетов бота с ручными расчетами без учета выходных.
+    """
+    # Проверяем права администратора
+    if not is_admin(message.from_user.id, db_manager):
+        await message.answer("У вас нет прав администратора для включения тестового режима.")
+        return
+
+    from utils.test_helpers import disable_days_off_for_testing, update_employees_in_db
+
+    try:
+        # Сохраняем оригинальные данные в памяти для возможности восстановления
+        original_employees = disable_days_off_for_testing()
+
+        # Сохраняем информацию о тестовом режиме в глобальном контексте
+        global test_mode_active, original_employees_data
+        test_mode_active = True
+        original_employees_data = original_employees
+
+        # Обновляем базу данных
+        update_employees_in_db(db_manager)
+
+        # Отправляем информацию пользователю
+        await message.answer(
+            "✅ Тестовый режим активирован! Выходные дни сотрудников временно отключены.\n\n"
+            "В этом режиме календарный план будет рассчитан без учета выходных. "
+            "Это позволит сравнить результаты работы бота с ручными расчетами.\n\n"
+            "Для возврата в обычный режим используйте команду /normal_mode."
+        )
+
+        # Предлагаем пользователю создать новый проект или пересчитать существующий
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Создать новый проект", callback_data="create_test_project")],
+            [InlineKeyboardButton(text="Список проектов", callback_data="back_to_projects")]
+        ])
+
+        await message.answer(
+            "Что вы хотите сделать в тестовом режиме?",
+            reply_markup=markup
+        )
+
+    except Exception as e:
+        await message.answer(f"Ошибка при включении тестового режима: {str(e)}")
+
+
+@router.message(Command("normal_mode"))
+async def cmd_normal_mode(message: Message):
+    """
+    Возвращает нормальный режим работы бота с учетом выходных дней.
+    """
+    # Проверяем права администратора
+    if not is_admin(message.from_user.id, db_manager):
+        await message.answer("У вас нет прав администратора для изменения режима работы.")
+        return
+
+    # Проверяем, активен ли тестовый режим
+    global test_mode_active, original_employees_data
+    if not test_mode_active:
+        await message.answer("Бот уже работает в обычном режиме с учетом выходных дней.")
+        return
+
+    from utils.test_helpers import restore_days_off, update_employees_in_db
+
+    try:
+        # Восстанавливаем оригинальные данные о выходных днях
+        restore_days_off(original_employees_data)
+
+        # Сбрасываем флаг тестового режима
+        test_mode_active = False
+        original_employees_data = None
+
+        # Обновляем базу данных
+        update_employees_in_db(db_manager)
+
+        # Отправляем информацию пользователю
+        await message.answer(
+            "✅ Нормальный режим восстановлен!\n\n"
+            "Теперь календарный план будет рассчитываться с учетом выходных дней сотрудников."
+        )
+
+    except Exception as e:
+        await message.answer(f"Ошибка при восстановлении обычного режима: {str(e)}")
+
+
+@router.callback_query(F.data == "create_test_project")
+async def create_test_project(callback: CallbackQuery, state: FSMContext):
+    """
+    Начинает создание тестового проекта в тестовом режиме.
+    """
+    await callback.message.edit_text("Введите название тестового проекта:")
+    await state.set_state(ProjectState.waiting_for_name)
+
 
 async def main():
     # Убедимся, что таблицы созданы

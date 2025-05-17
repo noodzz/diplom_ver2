@@ -23,21 +23,68 @@ class GanttChart:
         Returns:
             str: Путь к созданному файлу диаграммы
         """
+        print(f"Создание диаграммы Ганта для проекта '{project['name']}'")
+
         # Фильтруем только основные задачи (без подзадач)
         main_tasks = [task for task in tasks if not task.get('parent_id')]
+
+        # Для отладки выводим данные из базы
+        print(f"Всего задач: {len(tasks)}, основных задач: {len(main_tasks)}")
+        print(f"Данные дат из task_dates: {len(task_dates)} записей")
+
+        # Проверка соответствия ID задач и их дат
+        for task in main_tasks:
+            task_id = task['id']
+            task_id_str = str(task_id)
+
+            if task_id in task_dates:
+                print(f"Задача {task_id}: {task['name']} - даты из task_dates: {task_dates[task_id]}")
+            elif task_id_str in task_dates:
+                print(
+                    f"Задача {task_id}: {task['name']} - даты из task_dates по строковому ключу: {task_dates[task_id_str]}")
+            else:
+                # Проверяем, есть ли даты в самой задаче
+                if 'start_date' in task and 'end_date' in task:
+                    print(
+                        f"Задача {task_id}: {task['name']} - даты из задачи: {task['start_date']} - {task['end_date']}")
+                else:
+                    print(f"ПРЕДУПРЕЖДЕНИЕ: Даты для задачи {task_id}: {task['name']} не найдены!")
 
         # Преобразуем даты в объекты datetime и создаем список задач
         task_list = []
         for task in main_tasks:
-            if task['id'] in task_dates:
-                start_date = datetime.strptime(task_dates[task['id']]['start'], '%Y-%m-%d')
-                end_date = datetime.strptime(task_dates[task['id']]['end'], '%Y-%m-%d')
-                task_list.append((task, start_date, end_date))
+            task_id = task['id']
+            task_id_str = str(task_id)
+
+            # Ищем даты в разных источниках (приоритет: task_dates -> задача -> проект)
+            if task_id in task_dates and 'start' in task_dates[task_id] and 'end' in task_dates[task_id]:
+                # Даты из словаря дат по числовому ID
+                start_date = datetime.strptime(task_dates[task_id]['start'], '%Y-%m-%d')
+                end_date = datetime.strptime(task_dates[task_id]['end'], '%Y-%m-%d')
+            elif task_id_str in task_dates and 'start' in task_dates[task_id_str] and 'end' in task_dates[task_id_str]:
+                # Даты из словаря дат по строковому ID
+                start_date = datetime.strptime(task_dates[task_id_str]['start'], '%Y-%m-%d')
+                end_date = datetime.strptime(task_dates[task_id_str]['end'], '%Y-%m-%d')
+            elif 'start_date' in task and 'end_date' in task and task['start_date'] and task['end_date']:
+                # Даты из самой задачи
+                start_date = datetime.strptime(task['start_date'], '%Y-%m-%d')
+                end_date = datetime.strptime(task['end_date'], '%Y-%m-%d')
             else:
                 # Если нет дат, используем даты проекта
+                print(f"Не найдены даты для задачи {task_id}: {task['name']}, используем дату проекта")
                 start_date = datetime.strptime(project['start_date'], '%Y-%m-%d')
-                end_date = start_date + timedelta(days=task['duration'] - 1)  # -1 т.к. включительно
-                task_list.append((task, start_date, end_date))
+                end_date = start_date + timedelta(days=task.get('duration', 1) - 1)  # -1 т.к. включительно
+
+            # Рассчитываем фактическую длительность задачи с учетом выходных
+            actual_duration = (end_date - start_date).days + 1  # +1 т.к. включительно
+
+            # Создаем копию задачи с добавлением фактической длительности
+            task_copy = task.copy()
+            task_copy['actual_duration'] = actual_duration
+
+            task_list.append((task_copy, start_date, end_date))
+            print(
+                f"Добавлена задача {task_id}: {task['name']} с датами {start_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}, длительность: {actual_duration} дней")
 
         # Сортировка по дате начала
         task_list.sort(key=lambda x: x[1])
@@ -55,26 +102,34 @@ class GanttChart:
             end_dates.append(end + timedelta(days=1))  # Добавляем день для невключительной даты
 
         # Определяем общие даты проекта
-        project_start = min(start_dates) if start_dates else datetime.strptime(project['start_date'], '%Y-%m-%d')
-        project_end = max([end - timedelta(days=1) for end in end_dates]) if end_dates else project_start + timedelta(
-            days=30)
+        if not start_dates:
+            # Если нет задач с датами, используем даты проекта
+            project_start = datetime.strptime(project['start_date'], '%Y-%m-%d')
+            project_end = project_start + timedelta(days=7)  # Предполагаем по умолчанию 7 дней
+        else:
+            # Используем фактические даты задач
+            project_start = min(start_dates)
+            project_end = max([end - timedelta(days=1) for end in end_dates])  # Убираем добавленный день
 
         # Конец проекта для отображения (на день больше)
         project_end_display = project_end + timedelta(days=1)
+
+        print(f"Период проекта: {project_start.strftime('%Y-%m-%d')} - {project_end.strftime('%Y-%m-%d')}")
 
         # Создаем фигуру с нужными размерами
         fig_height = max(8, len(sorted_tasks) * 0.4 + 2)
         fig, ax = plt.subplots(figsize=(12, fig_height))
 
-        # Названия задач
-        labels = [f"{task['name']} ({task['duration']} дн.)" for task in sorted_tasks]
+        # Названия задач с фактической длительностью
+        labels = [f"{task['name']} ({task.get('actual_duration', task.get('duration', 0))} дн.)" for task in
+                  sorted_tasks]
         y_positions = np.arange(len(labels))
 
         # Цвета для критического пути и обычных задач
         colors = []
         if critical_path:
             for task in sorted_tasks:
-                if task['id'] in critical_path:
+                if task['id'] in critical_path or str(task['id']) in critical_path:
                     colors.append('r')  # Красный для задач критического пути
                 else:
                     colors.append('b')  # Синий для обычных задач
@@ -99,7 +154,7 @@ class GanttChart:
 
             # Конечная дата (невключительная)
             ax.text(end + timedelta(days=0.2), y_positions[i],
-                    end.strftime('%d.%m'),
+                    (end - timedelta(days=1)).strftime('%d.%m'),  # Вычитаем день для правильного отображения
                     va='center', ha='left', fontsize=8)
 
         # Настраиваем оси

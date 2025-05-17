@@ -86,6 +86,22 @@ class DatabaseManager:
                     (employee['id'], employee['name'], employee['position'], json.dumps(employee['days_off']))
                 )
 
+            # Загружаем информацию о разрешенных пользователях, если таблица пуста
+            self.cursor.execute("SELECT COUNT(*) FROM users")
+            users_count = self.cursor.fetchone()[0]
+
+            if users_count == 0:
+                print("Таблица пользователей пуста, добавляем разрешенных пользователей из конфигурации...")
+                for user_id in Config.ALLOWED_USER_IDS:
+                    # Первый пользователь в списке будет администратором
+                    is_admin = 1 if Config.ALLOWED_USER_IDS and user_id == Config.ALLOWED_USER_IDS[0] else 0
+
+                    self.cursor.execute(
+                        "INSERT INTO users (id, name, is_admin, is_active) VALUES (?, ?, ?, ?)",
+                        (user_id, f"User_{user_id}", is_admin, 1)
+                    )
+                    print(f"Добавлен пользователь с ID {user_id}, admin={is_admin}")
+
         self.connection.commit()
         self.close()
 

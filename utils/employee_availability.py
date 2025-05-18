@@ -114,9 +114,10 @@ def get_available_dates_for_task(employee_id, start_date_str, duration, employee
         return None, None, None
 
 
-def find_suitable_employee(position, start_date, duration, employee_manager, employee_workload=None):
+def find_suitable_employee(position, start_date, duration, employee_manager, employee_workload=None,
+                           exclude_employees=None):
     """
-    Находит подходящего сотрудника для задачи с учетом выходных дней
+    Находит подходящего сотрудника для задачи с учетом выходных дней и уже назначенных задач.
 
     Args:
         position (str): Требуемая должность
@@ -124,6 +125,7 @@ def find_suitable_employee(position, start_date, duration, employee_manager, emp
         duration (int): Длительность задачи в рабочих днях
         employee_manager: Менеджер сотрудников
         employee_workload (dict): Словарь текущей загрузки сотрудников (employee_id -> рабочих дней)
+        exclude_employees (list): Список ID сотрудников, которых нужно исключить из рассмотрения
 
     Returns:
         tuple: (employee_id, start_date, end_date, calendar_duration) или (None, None, None, None) в случае ошибки
@@ -135,6 +137,20 @@ def find_suitable_employee(position, start_date, duration, employee_manager, emp
         if not suitable_employees:
             print(f"Не найдены сотрудники с должностью '{position}'")
             return None, None, None, None
+
+        # Если exclude_employees указан, исключаем этих сотрудников из рассмотрения
+        if exclude_employees:
+            original_count = len(suitable_employees)
+            suitable_employees = [e for e in suitable_employees if e['id'] not in exclude_employees]
+            print(f"Исключено {original_count - len(suitable_employees)} сотрудников из списка подходящих")
+
+            # Если после исключения не осталось подходящих сотрудников, выводим предупреждение
+            if not suitable_employees:
+                print(f"ПРЕДУПРЕЖДЕНИЕ: После исключения сотрудников из списка не осталось подходящих кандидатов")
+                # В этом случае можно либо вернуть None, либо игнорировать исключения
+                # Восстанавливаем список сотрудников, игнорируя исключения
+                suitable_employees = employee_manager.get_employees_by_position(position)
+                print(f"Рассматриваем всех сотрудников с должностью '{position}' ({len(suitable_employees)} чел.)")
 
         # Если workload не предоставлен, инициализируем пустой словарь
         if employee_workload is None:
@@ -150,7 +166,12 @@ def find_suitable_employee(position, start_date, duration, employee_manager, emp
         for employee in suitable_employees:
             employee_id = employee['id']
 
+            # Проверяем, не в списке ли исключений этот сотрудник
+            if exclude_employees and employee_id in exclude_employees:
+                continue
+
             # Получаем возможные даты выполнения задачи для данного сотрудника
+            from utils.employee_availability import get_available_dates_for_task
             task_start, task_end, calendar_duration = get_available_dates_for_task(
                 employee_id, start_date, duration, employee_manager
             )
@@ -162,9 +183,8 @@ def find_suitable_employee(position, start_date, duration, employee_manager, emp
                 # Выбираем сотрудника с минимальной загрузкой
                 # или с минимальной календарной длительностью при равной загрузке
                 if (best_employee_id is None or
-                    current_workload < best_workload or
-                    (current_workload == best_workload and calendar_duration < best_calendar_duration)):
-
+                        current_workload < best_workload or
+                        (current_workload == best_workload and calendar_duration < best_calendar_duration)):
                     best_employee_id = employee_id
                     best_start_date = task_start
                     best_end_date = task_end
@@ -174,6 +194,14 @@ def find_suitable_employee(position, start_date, duration, employee_manager, emp
         if best_employee_id:
             # Обновляем загрузку выбранного сотрудника
             employee_workload[best_employee_id] = employee_workload.get(best_employee_id, 0) + duration
+
+            # Выводим информацию о выбранном сотруднике
+            try:
+                employee_name = employee_manager.get_employee(best_employee_id)['name']
+                print(
+                    f"Выбран сотрудник {employee_name} (ID: {best_employee_id}) с текущей загрузкой {best_workload} дней")
+            except:
+                print(f"Выбран сотрудник ID: {best_employee_id} с текущей загрузкой {best_workload} дней")
 
             return best_employee_id, best_start_date, best_end_date, best_calendar_duration
         else:

@@ -113,9 +113,14 @@ class GanttChart:
         # Сортируем задачи по дате начала
         df = df.sort_values('Start')
 
-        # Создаем фигуру
+        # Определяем максимальную длину имени задачи для расчета размера фигуры
+        max_task_name_length = max(len(task_name) for task_name in df['Task'])
+
+        # Создаем фигуру с учетом количества задач и длины их названий
         fig_height = max(6, len(df) * 0.4 + 1)
-        fig, ax = plt.subplots(figsize=(12, fig_height))
+        # Увеличиваем ширину фигуры для размещения всех дат
+        fig_width = 14 + (max_task_name_length / 20)  # Динамически регулируем ширину
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
 
         # Определяем общие даты проекта
         project_start = df['Start'].min()
@@ -124,13 +129,22 @@ class GanttChart:
         # Вычисляем длительность проекта в днях
         project_duration = (project_end - project_start).days + 1
 
-        # Создаем список дат от начала до конца проекта для точного позиционирования
+        # Добавляем буфер с обеих сторон для лучшего отображения
+        buffer_days = max(2, int(project_duration * 0.05))  # 5% от длительности проекта, но не менее 2 дней
+        extended_start = project_start - timedelta(days=buffer_days)
+        extended_end = project_end + timedelta(days=buffer_days)
+
+        # Создаем расширенный список дат от начала до конца проекта для точного позиционирования
+        extended_date_range = [extended_start + timedelta(days=x) for x in
+                               range((extended_end - extended_start).days + 1)]
+
+        # Создаем основной список дат для отображения задач
         date_range = [project_start + timedelta(days=x) for x in range((project_end - project_start).days + 1)]
 
         # Создаем Y-координаты для задач
         y_positions = np.arange(len(df))
 
-        # Рисуем задачи на диаграмме
+        # Рисуем задачи на диаграмме - с корректировкой для визуального разделения
         for i, (_, row) in enumerate(df.iterrows()):
             # Получаем индекс начала и конца в date_range
             start_idx = (row['Start'] - project_start).days
@@ -139,27 +153,41 @@ class GanttChart:
             # Вычисляем длительность в днях
             duration_days = end_idx - start_idx + 1
 
+            # Для визуального разделения, сделаем блоки чуть короче их полной длительности
+            visual_adjustment = 0.05  # 5% корректировка для визуального разделения
+
             # Задаем цвет в зависимости от того, входит ли задача в критический путь
             color = 'r' if row['Critical'] else 'b'
 
-            # Рисуем прямоугольник
-            ax.barh(y_positions[i], duration_days, left=start_idx, height=0.7,
+            # Рисуем прямоугольник с небольшими визуальными отступами для устранения пересечений
+            ax.barh(y_positions[i], duration_days - visual_adjustment,
+                    left=start_idx, height=0.7,
                     align='center', color=color, alpha=0.9, edgecolor='black')
-
-            # Выводим отладочную информацию
-            print(f"Прямоугольник для задачи '{row['Task']}':")
-            print(f"  Позиция Y: {y_positions[i]}")
-            print(f"  Начало: индекс {start_idx} ({row['Start'].strftime('%Y-%m-%d')})")
-            print(f"  Конец: индекс {end_idx} ({row['End'].strftime('%Y-%m-%d')})")
-            print(f"  Длительность: {duration_days} дней")
 
         # Настраиваем оси
         ax.set_yticks(y_positions)
         ax.set_yticklabels(df['Task'].tolist())
 
-        # Создаем сетку с четкими делениями для каждого дня
+        # Создаем более компактные подписи дат
+        date_labels = [d.strftime('%d.%m') for d in date_range]
+
+        # Устанавливаем метки для каждого дня, но отображаем только определенные интервалы
         ax.set_xticks(range(len(date_range)))
-        ax.set_xticklabels([d.strftime('%d.%m') for d in date_range], rotation=45, fontsize=8)
+
+        # Определяем интервал для меток даты на основе количества дней
+        if project_duration > 60:
+            date_interval = 5  # Показываем каждый 5-й день для длинных проектов
+        elif project_duration > 30:
+            date_interval = 3  # Показываем каждый 3-й день для средних проектов
+        else:
+            date_interval = 1  # Показываем каждый день для коротких проектов
+
+        # Устанавливаем метки с правильным интервалом
+        visible_ticks = range(0, len(date_range), date_interval)
+        visible_labels = [date_labels[i] for i in visible_ticks]
+
+        ax.set_xticks(visible_ticks)
+        ax.set_xticklabels(visible_labels, rotation=45, fontsize=8, ha='right')
 
         # Добавляем основную сетку
         ax.grid(True, axis='x', which='major', linestyle='-', alpha=0.5)
@@ -171,16 +199,19 @@ class GanttChart:
         ax.set_xlabel('Дата')
         ax.set_ylabel('Задача')
 
-        # Устанавливаем диапазон по X
-        ax.set_xlim(-0.5, len(date_range) - 0.5)
+        # Устанавливаем диапазон по X с дополнительным пространством справа для последних дат
+        ax.set_xlim(-1, len(date_range) + 1)  # Добавляем запас с обеих сторон
 
         # Добавляем примечание о формате дат
         fig.text(0.5, 0.01,
                  "Примечание: Конечные даты указаны включительно. Например, задача '19.05 - 21.05' выполняется с начала 19.05 до конца 21.05.",
                  ha='center', fontsize=9)
 
-        # Плотная компоновка
-        fig.tight_layout(rect=[0, 0.03, 1, 0.97])
+        # Плотная компоновка c уменьшенными отступами справа
+        plt.tight_layout(rect=[0, 0.03, 0.98, 0.97], pad=2.0)
+
+        # Увеличиваем отступ справа для помещения всех дат
+        plt.subplots_adjust(right=0.95)
 
         # Создаем безопасное имя файла
         safe_project_name = self._create_safe_filename(project['name'])

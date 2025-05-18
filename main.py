@@ -692,6 +692,7 @@ async def back_to_projects(callback: CallbackQuery):
 # -----------------------------------------------------------------------------
 
 @router.callback_query(lambda c: c.data.startswith("calculate_"))
+@router.callback_query(lambda c: c.data.startswith("calculate_"))
 async def calculate_schedule(callback: CallbackQuery):
     """
     Обработчик для расчета календарного плана проекта.
@@ -712,6 +713,7 @@ async def calculate_schedule(callback: CallbackQuery):
         print(f"Получено {len(tasks)} основных задач и {len(all_tasks)} задач всего (включая подзадачи)")
 
         # Выполняем расчет календарного плана с учетом выходных дней
+        # Устанавливаем prioritize_duration=True для приоритета сроков проекта над балансировкой
         result = schedule_project(project, tasks, task_manager, employee_manager)
 
         # Создаем словарь задач для передачи в функцию балансировки
@@ -723,12 +725,6 @@ async def calculate_schedule(callback: CallbackQuery):
             task_map[str(task_id)] = task
 
         print(f"Создан словарь task_map с {len(task_map)} задачами")
-
-        # Балансируем нагрузку между сотрудниками
-        balanced_task_dates = balance_employee_workload(result['task_dates'], task_map, employee_manager)
-
-        # Обновляем результаты с учетом балансировки
-        result['task_dates'] = balanced_task_dates
 
         # Обновляем назначения и даты в базе данных с улучшенной функцией
         update_result = update_database_assignments(result['task_dates'], task_manager, employee_manager)

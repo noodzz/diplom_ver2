@@ -1,7 +1,7 @@
-import os
 import logging
 import asyncio
 import json
+import os
 import tempfile
 import datetime
 
@@ -571,9 +571,6 @@ async def cmd_list_projects(message: Message):
 
 @router.callback_query(lambda c: c.data.startswith("view_project_"))
 async def view_project_callback(callback: CallbackQuery):
-    import os
-    import tempfile
-
     project_id = int(callback.data.split("_")[2])
 
     try:
@@ -881,6 +878,9 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
     text += f"🚩 КРИТИЧЕСКИЙ ПУТЬ\n"
     text += f"Критический путь — последовательность задач, определяющая длительность проекта.\n"
     text += f"Задержка любой из этих задач приведет к задержке всего проекта.\n\n"
+
+    text += f"Примечание: Все даты указаны включительно. Например, задача с датами '19.05.2025 - 21.05.2025' "
+    text += f"выполняется с начала 19.05 до конца 21.05.\n\n"
 
     if critical_path:
         critical_tasks = []
@@ -1424,9 +1424,6 @@ async def show_workload_report(callback, project_id, employee_manager, project, 
             await callback.message.edit_text(report, reply_markup=markup)
         else:
             # Если отчет слишком длинный, сохраняем его в файл и отправляем как документ
-            import tempfile
-            import os
-
             temp_dir = tempfile.mkdtemp()
 
             # Создаем безопасное имя файла
@@ -1446,7 +1443,6 @@ async def show_workload_report(callback, project_id, employee_manager, project, 
             )
 
             # Отправляем файл с отчетом
-            from aiogram.types import FSInputFile
             file = FSInputFile(file_path)
             await callback.message.answer_document(
                 file,

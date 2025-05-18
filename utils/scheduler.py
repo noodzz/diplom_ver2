@@ -1242,7 +1242,8 @@ def calculate_project_duration(project_start_date, task_dates):
 
 def balance_employee_workload(task_dates, task_map, employee_manager):
     """
-    Балансирует нагрузку между сотрудниками одной должности
+    Балансирует нагрузку между сотрудниками одной должности,
+    включая ВСЕХ доступных сотрудников в расчет
 
     Args:
         task_dates (dict): Словарь с датами и назначениями задач
@@ -1263,7 +1264,43 @@ def balance_employee_workload(task_dates, task_map, employee_manager):
     # Словарь для отслеживания задач каждого сотрудника
     employee_tasks = {}  # employee_id -> список (task_id, task, duration)
 
-    # Шаг 1: Анализируем текущие назначения
+    # Шаг 1: Получаем все должности из конфигурации
+    all_positions = set()
+    try:
+        from data.config import Config
+        all_positions = set(Config.POSITIONS)
+        print(f"Получены все должности из конфигурации: {all_positions}")
+    except Exception as e:
+        print(f"Ошибка при получении списка должностей: {str(e)}")
+        # В случае неудачи, получаем должности из сотрудников
+        try:
+            all_employees = employee_manager.get_all_employees()
+            all_positions = set(emp.get('position') for emp in all_employees if emp.get('position'))
+            print(f"Получены должности из списка сотрудников: {all_positions}")
+        except:
+            print("Не удалось получить список должностей")
+
+    # Шаг 2: Для каждой должности получаем всех доступных сотрудников
+    all_available_employees = {}  # должность -> список сотрудников
+    for position in all_positions:
+        try:
+            employees = employee_manager.get_employees_by_position(position)
+            if employees:
+                all_available_employees[position] = employees
+                position_employees[position] = [emp['id'] for emp in employees]
+
+                # Инициализируем словари для всех сотрудников
+                for emp in employees:
+                    emp_id = emp['id']
+                    if emp_id not in employee_workload:
+                        employee_workload[emp_id] = 0
+                        employee_tasks[emp_id] = []
+
+                print(f"Должность '{position}': найдено {len(employees)} сотрудников")
+        except Exception as e:
+            print(f"Ошибка при получении сотрудников для должности '{position}': {str(e)}")
+
+    # Шаг 3: Анализируем текущие назначения
     for task_id, dates in task_dates.items():
         employee_id = dates.get('employee_id')
         if not employee_id:
@@ -1298,7 +1335,7 @@ def balance_employee_workload(task_dates, task_map, employee_manager):
         employee_workload[employee_id] += task_duration
         employee_tasks[employee_id].append((task_id, task, task_duration))
 
-        # Получаем должность сотрудника
+        # Получаем должность сотрудника и добавляем в position_employees, если ещё не там
         try:
             employee = employee_manager.get_employee(employee_id)
             position = employee.get('position')
@@ -1322,11 +1359,11 @@ def balance_employee_workload(task_dates, task_map, employee_manager):
             except Exception as e:
                 print(f"  - Сотрудник ID {emp_id}: {employee_workload.get(emp_id, 0)} дней - Ошибка: {str(e)}")
 
-    # Шаг 2: Выявляем дисбаланс в нагрузке
+    # Шаг 4: Выявляем дисбаланс в нагрузке - сниженный порог до 1 дня
     position_imbalances = []  # список кортежей (position, imbalance)
 
     for position, employees in position_employees.items():
-        if len(employees) <= 1:
+        if len(employees) <= 2:
             continue  # Нет смысла балансировать, если только один сотрудник
 
         # Находим минимальную и максимальную нагрузку
@@ -1337,15 +1374,15 @@ def balance_employee_workload(task_dates, task_map, employee_manager):
         # Вычисляем дисбаланс
         imbalance = max_load - min_load
 
-        # Снижаем порог до 3 дней для более агрессивной балансировки
-        if imbalance >= 3:
+        # Используем порог в 1 день для более агрессивной балансировки
+        if imbalance >= 1:
             position_imbalances.append((position, imbalance))
             print(f"Выявлен дисбаланс для должности {position}: {imbalance} дней")
 
     # Сортируем позиции по степени дисбаланса - вначале обрабатываем наибольшие дисбалансы
     position_imbalances.sort(key=lambda x: x[1], reverse=True)
 
-    # Шаг 3: Перераспределяем задачи для балансировки нагрузки
+    # Шаг 5: Перераспределяем задачи для балансировки нагрузки
     balancing_changes = {}  # task_id -> new_employee_id
 
     for position, imbalance in position_imbalances:
@@ -1365,8 +1402,9 @@ def balance_employee_workload(task_dates, task_map, employee_manager):
                 most_loaded = employee_workload.get(most_loaded_emp, 0)
 
                 current_imbalance = most_loaded - least_loaded
-                if current_imbalance < 2:
-                    continue  # Небольшой дисбаланс допустим
+                # Уменьшаем порог до 1 дня
+                if current_imbalance < 1:
+                    continue  # Минимальный дисбаланс допустим
 
                 print(
                     f"Перераспределение задач от {most_loaded_emp} (нагрузка: {most_loaded}) к {least_loaded_emp} (нагрузка: {least_loaded})")
@@ -1382,15 +1420,17 @@ def balance_employee_workload(task_dates, task_map, employee_manager):
                 for task_info in tasks_to_reassign:
                     task_id, task, duration = task_info
 
-                    # Проверяем подходящую длительность для балансировки
-                    if duration <= current_imbalance:
-                        # Добавляем в список потенциальных задач
-                        tasks_for_balance.append(task_info)
+                    # Проверяем, что эта должность подходит для задачи
+                    if task.get('position') and task.get('position') != position:
+                        continue  # Пропускаем задачи, требующие другую должность
 
-                # Если нет подходящих по длительности задач, а дисбаланс большой,
-                # возьмем хотя бы самую короткую задачу
-                if not tasks_for_balance and current_imbalance >= 4 and tasks_to_reassign:
-                    tasks_for_balance = [min(tasks_to_reassign, key=lambda x: x[2])]
+                    # Добавляем в список потенциальных задач все подходящие по должности
+                    tasks_for_balance.append(task_info)
+
+                # Если нет подходящих задач, пропускаем эту пару сотрудников
+                if not tasks_for_balance:
+                    print(f"  У сотрудника {most_loaded_emp} нет подходящих задач для перераспределения")
+                    continue
 
                 # Перераспределяем задачи пока не достигнем баланса
                 reassigned_count = 0
@@ -1399,8 +1439,14 @@ def balance_employee_workload(task_dates, task_map, employee_manager):
                     current_imbalance = employee_workload.get(most_loaded_emp, 0) - employee_workload.get(
                         least_loaded_emp, 0)
 
-                    if current_imbalance < 2:
-                        break  # Достигли достаточного баланса
+                    # Если дисбаланс меньше длительности задачи, это может сделать ситуацию хуже
+                    if current_imbalance < duration:
+                        # Только если это последняя попытка и перераспределений еще не было,
+                        # можно перебросить маленькую задачу
+                        if reassigned_count == 0 and len(tasks_for_balance) == 1:
+                            pass  # Продолжаем и перераспределяем единственную задачу
+                        else:
+                            continue  # Иначе пропускаем задачу
 
                     # Проверяем доступность менее загруженного сотрудника
                     task_start = None
@@ -1427,6 +1473,7 @@ def balance_employee_workload(task_dates, task_map, employee_manager):
                             pass
 
                         # Проверяем доступность наименее загруженного сотрудника для задачи
+                        from utils.employee_availability import get_available_dates_for_task
                         emp_start, emp_end, _ = get_available_dates_for_task(
                             least_loaded_emp, task_start, duration, employee_manager
                         )
@@ -1457,7 +1504,7 @@ def balance_employee_workload(task_dates, task_map, employee_manager):
                         reassigned_count += 1
 
                         # Если достигли баланса, переходим к следующей паре
-                        if employee_workload[most_loaded_emp] - employee_workload[least_loaded_emp] < 2:
+                        if employee_workload[most_loaded_emp] - employee_workload[least_loaded_emp] < 1:
                             break
 
                     except Exception as e:
@@ -1468,16 +1515,14 @@ def balance_employee_workload(task_dates, task_map, employee_manager):
                 # Выводим результат для пары сотрудников
                 if reassigned_count > 0:
                     print(f"  Перераспределено {reassigned_count} задач между сотрудниками")
-                    most_loaded_name = "Неизвестный"
-                    least_loaded_name = "Неизвестный"
                     try:
                         most_loaded_name = employee_manager.get_employee(most_loaded_emp)['name']
                     except:
-                        pass
+                        most_loaded_name = f"Сотрудник {most_loaded_emp}"
                     try:
                         least_loaded_name = employee_manager.get_employee(least_loaded_emp)['name']
                     except:
-                        pass
+                        least_loaded_name = f"Сотрудник {least_loaded_emp}"
                     print(f"  Новая нагрузка {most_loaded_name}: {employee_workload[most_loaded_emp]} дней")
                     print(f"  Новая нагрузка {least_loaded_name}: {employee_workload[least_loaded_emp]} дней")
 

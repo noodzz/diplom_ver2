@@ -92,10 +92,10 @@ def get_available_dates_for_task(employee_id, start_date_str, duration, employee
             return None, None, None
 
         # Эксклюзивная модель дат: дата окончания - день ПОСЛЕ завершения (дедлайн в 00:00)
-        end_date = last_working_day + datetime.timedelta(days=1)
+        end_date = last_working_day
 
         # Календарная длительность = количество дней от начала до окончания в эксклюзивной модели
-        calendar_duration = (end_date - first_working_day).days
+        calendar_duration = (end_date - first_working_day).days + 1
 
         print(f"Для сотрудника {employee_id} задача длительностью {duration} рабочих дней")
         print(f"  будет выполняться с {first_working_day.strftime('%Y-%m-%d')} по {last_working_day.strftime('%Y-%m-%d')}")

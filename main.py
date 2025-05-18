@@ -25,7 +25,7 @@ from services.network_model import NetworkModel
 from services.gantt_chart import GanttChart
 from services.workload_chart import WorkloadChart
 from utils.helpers import parse_csv, format_date, is_authorized, is_admin
-from utils.scheduler import schedule_project, update_database_assignments, balance_employee_workload
+from utils.scheduler import schedule_project,balance_employee_workload
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -725,10 +725,6 @@ async def calculate_schedule(callback: CallbackQuery):
             task_map[str(task_id)] = task
 
         print(f"Создан словарь task_map с {len(task_map)} задачами")
-
-        # Обновляем назначения и даты в базе данных с улучшенной функцией
-        update_result = update_database_assignments(result['task_dates'], task_manager, employee_manager)
-        print(f"Обновлено {update_result} записей в базе данных")
 
         # Формируем результаты для отображения
         task_dates = result['task_dates']

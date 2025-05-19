@@ -25,7 +25,8 @@ from services.network_model import NetworkModel
 from services.gantt_chart import GanttChart
 from services.workload_chart import WorkloadChart
 from utils.helpers import parse_csv, format_date, is_authorized, is_admin
-from utils.scheduler import schedule_project,balance_employee_workload
+from utils.scheduler import schedule_project, balance_employee_workload, update_database_assignments, \
+    debug_check_parent_subtask_dates
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -692,7 +693,6 @@ async def back_to_projects(callback: CallbackQuery):
 # -----------------------------------------------------------------------------
 
 @router.callback_query(lambda c: c.data.startswith("calculate_"))
-@router.callback_query(lambda c: c.data.startswith("calculate_"))
 async def calculate_schedule(callback: CallbackQuery):
     """
     Обработчик для расчета календарного плана проекта.
@@ -713,9 +713,10 @@ async def calculate_schedule(callback: CallbackQuery):
         print(f"Получено {len(tasks)} основных задач и {len(all_tasks)} задач всего (включая подзадачи)")
 
         # Выполняем расчет календарного плана с учетом выходных дней
-        # Устанавливаем prioritize_duration=True для приоритета сроков проекта над балансировкой
         result = schedule_project(project, tasks, task_manager, employee_manager)
-
+        print(f"Updating database with calculated dates for {len(result['task_dates'])} tasks...")
+        update_count = update_database_assignments(result['task_dates'], task_manager, employee_manager)
+        print(f"Successfully updated {update_count} tasks in database")
         # Создаем словарь задач для передачи в функцию балансировки
         task_map = {}
         for task in all_tasks:  # Используем все задачи, включая подзадачи
@@ -725,7 +726,7 @@ async def calculate_schedule(callback: CallbackQuery):
             task_map[str(task_id)] = task
 
         print(f"Создан словарь task_map с {len(task_map)} задачами")
-
+        debug_check_parent_subtask_dates(result['task_dates'], task_map, task_manager)
         # Формируем результаты для отображения
         task_dates = result['task_dates']
         critical_path = result['critical_path']

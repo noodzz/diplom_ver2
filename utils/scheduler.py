@@ -241,7 +241,6 @@ def schedule_project(project, tasks, task_manager, employee_manager):
         'duration': project_duration
     }
 
-
 def process_subtasks(task_dates, task_map, graph, task_manager, employee_manager):
     """
     Обрабатывает подзадачи групповых задач, устанавливая для них даты и назначая исполнителей,
@@ -258,7 +257,7 @@ def process_subtasks(task_dates, task_map, graph, task_manager, employee_manager
     from utils.employee_availability import find_suitable_employee, get_available_dates_for_task
 
     print("Обработка подзадач групповых задач...")
-
+    parent_to_subtasks = {}
     # Словарь для отслеживания загрузки сотрудников
     employee_workload = {}
 
@@ -693,16 +692,32 @@ def process_subtasks(task_dates, task_map, graph, task_manager, employee_manager
         latest_subtask_end = None
         for subtask in subtasks_from_map:
             subtask_id = subtask['id']
+
+            # Enhanced search for subtask end date in multiple possible formats
+            subtask_end_date = None
             if subtask_id in task_dates and 'end' in task_dates[subtask_id]:
-                subtask_end = datetime.datetime.strptime(task_dates[subtask_id]['end'], '%Y-%m-%d')
+                subtask_end_date = task_dates[subtask_id]['end']
+            elif str(subtask_id) in task_dates and 'end' in task_dates[str(subtask_id)]:
+                subtask_end_date = task_dates[str(subtask_id)]['end']
+
+            if subtask_end_date:
+                subtask_end = datetime.datetime.strptime(subtask_end_date, '%Y-%m-%d')
                 if latest_subtask_end is None or subtask_end > latest_subtask_end:
                     latest_subtask_end = subtask_end
+                    print(f"  New latest end date from subtask {subtask_id}: {subtask_end_date}")
 
-        # Если последняя подзадача заканчивается позже, чем групповая задача,
-        # обновляем дату окончания групповой задачи
+        # Ensure we're working with datetime objects for comparison
+        if latest_subtask_end and isinstance(group_end, str):
+            group_end = datetime.datetime.strptime(group_end, '%Y-%m-%d')
+
+        # If the latest subtask ends after the group task, update the group task's end date
         if latest_subtask_end and latest_subtask_end > group_end:
-            task_dates[group_id]['end'] = latest_subtask_end.strftime('%Y-%m-%d')
-            print(f"Дата окончания групповой задачи {group_id} обновлена до {latest_subtask_end.strftime('%Y-%m-%d')}")
+            group_end_str = latest_subtask_end.strftime('%Y-%m-%d')
+            task_dates[group_id]['end'] = group_end_str
+            print(f"Дата окончания групповой задачи {group_id} обновлена до {group_end_str}")
+
+            # For debugging - confirm the update happened
+            print(f"ПРОВЕРКА: Новая дата окончания для группы {group_id}: {task_dates[group_id]['end']}")
 
     # Выводим статистику по назначениям
     print("\nСтатистика по назначениям подзадач:")
@@ -724,9 +739,122 @@ def process_subtasks(task_dates, task_map, graph, task_manager, employee_manager
             print(
                 f"Группа '{subtask_name}' с должностью '{position}' в {group_id}: назначено {emp_count} подзадач на {unique_emp_count} сотрудников (OK)")
 
+    print("\nПроверка и корректировка дат родительских задач...")
+
+    # Create a mapping of parent IDs to all their subtasks
+    for task_id, task in task_map.items():
+        parent_id = task.get('parent_id')
+        if parent_id:
+            # Convert parent_id to string for consistent handling
+            parent_id_str = str(parent_id)
+            if parent_id_str not in parent_to_subtasks:
+                parent_to_subtasks[parent_id_str] = []
+            parent_to_subtasks[parent_id_str].append(task_id)
+
+    # Process each parent task and ensure its dates encompass all subtasks
+    for parent_id, subtask_ids in parent_to_subtasks.items():
+        if parent_id not in task_dates:
+            print(f"  ПРОПУСК: Родительская задача {parent_id} не найдена в task_dates")
+            continue
+
+        parent_task = None
+        try:
+            # Try to get the parent task from task_map, handling different ID formats
+            if parent_id in task_map:
+                parent_task = task_map[parent_id]
+            elif int(parent_id) in task_map:
+                parent_task = task_map[int(parent_id)]
+        except (ValueError, TypeError) as e:
+            print(f"  ОШИБКА при получении родительской задачи {parent_id}: {str(e)}")
+            continue
+
+        if not parent_task:
+            print(f"  ПРОПУСК: Информация о родительской задаче {parent_id} не найдена")
+            continue
+
+        print(f"Проверка родительской задачи {parent_id}: {parent_task.get('name', 'Без имени')}")
+
+        # Find earliest start and latest end among all subtasks
+        earliest_start = None
+        latest_end = None
+
+        for subtask_id in subtask_ids:
+            subtask_start = None
+            subtask_end = None
+
+            # Check different forms of the subtask ID in task_dates
+            subtask_id_str = str(subtask_id)
+
+            # Try string ID
+            if subtask_id_str in task_dates:
+                if 'start' in task_dates[subtask_id_str]:
+                    subtask_start = task_dates[subtask_id_str]['start']
+                if 'end' in task_dates[subtask_id_str]:
+                    subtask_end = task_dates[subtask_id_str]['end']
+
+            # Try numeric ID if string didn't work
+            elif subtask_id in task_dates:
+                if 'start' in task_dates[subtask_id]:
+                    subtask_start = task_dates[subtask_id]['start']
+                if 'end' in task_dates[subtask_id]:
+                    subtask_end = task_dates[subtask_id]['end']
+
+            # Skip if we couldn't find start/end dates
+            if not subtask_start or not subtask_end:
+                print(f"  ПРОПУСК: Не найдены даты для подзадачи {subtask_id}")
+                continue
+
+            # Convert to datetime for comparison
+            try:
+                start_date = datetime.datetime.strptime(subtask_start, '%Y-%m-%d')
+                end_date = datetime.datetime.strptime(subtask_end, '%Y-%m-%d')
+
+                # Update earliest start if needed
+                if earliest_start is None or start_date < earliest_start:
+                    earliest_start = start_date
+
+                # Update latest end if needed
+                if latest_end is None or end_date > latest_end:
+                    latest_end = end_date
+                    print(f"  Обновлена дата окончания из подзадачи {subtask_id}: {subtask_end}")
+            except ValueError as e:
+                print(f"  ОШИБКА при обработке дат подзадачи {subtask_id}: {str(e)}")
+
+        # Now update parent task dates if needed
+        if earliest_start and latest_end:
+            parent_start_str = task_dates[parent_id].get('start')
+            parent_end_str = task_dates[parent_id].get('end')
+
+            # Skip if parent doesn't have dates yet
+            if not parent_start_str or not parent_end_str:
+                print(f"  ПРОПУСК: Родительская задача {parent_id} не имеет дат")
+                continue
+
+            parent_start = datetime.datetime.strptime(parent_start_str, '%Y-%m-%d')
+            parent_end = datetime.datetime.strptime(parent_end_str, '%Y-%m-%d')
+
+            # Check if we need to update parent dates
+            start_changed = earliest_start < parent_start
+            end_changed = latest_end > parent_end
+
+            if start_changed or end_changed:
+                # Update parent task dates
+                if start_changed:
+                    task_dates[parent_id]['start'] = earliest_start.strftime('%Y-%m-%d')
+                    print(f"  Обновлена дата начала родительской задачи {parent_id}: {task_dates[parent_id]['start']}")
+
+                if end_changed:
+                    task_dates[parent_id]['end'] = latest_end.strftime('%Y-%m-%d')
+                    print(f"  Обновлена дата окончания родительской задачи {parent_id}: {task_dates[parent_id]['end']}")
+            else:
+                print(f"  Даты родительской задачи {parent_id} не требуют обновления")
+
     processed_subtasks = sum(1 for tid in task_dates if tid in task_map and task_map[tid].get('parent_id'))
     print(f"Обработка подзадач завершена. Обработано {processed_subtasks} подзадач.")
+    print(f"Проверено {len(parent_to_subtasks)} родительских задач.")
 
+    processed_subtasks = sum(1 for tid in task_dates if tid in task_map and task_map[tid].get('parent_id'))
+    print(f"Обработка подзадач завершена. Обработано {processed_subtasks} подзадач.")
 
 def revalidate_dependent_tasks(task_dates, graph, task_map, task_manager, employee_manager):
     """
@@ -880,7 +1008,6 @@ def revalidate_dependent_tasks(task_dates, graph, task_map, task_manager, employ
                 if not any(next_dependent_id == task_id for task_id, _ in updates_needed):
                     next_start = datetime.datetime.strptime(task_dates[dependent_id]['end'], '%Y-%m-%d') + datetime.timedelta(days=1)
                     updates_needed.append((next_dependent_id, next_start.strftime('%Y-%m-%d')))
-
 
 def balance_employee_workload(task_dates, task_map, employee_manager):
     """
@@ -1445,7 +1572,6 @@ def balance_employee_workload(task_dates, task_map, employee_manager):
     # Возвращаем обновленный task_dates
     return task_dates
 
-
 def build_dependency_graph(tasks, task_manager):
     """
     Строит граф зависимостей между задачами
@@ -1572,7 +1698,6 @@ def build_dependency_graph(tasks, task_manager):
 
     return graph, task_map
 
-
 def topological_sort(graph):
     # Получаем все узлы графа
     all_nodes = set(graph.keys())
@@ -1632,7 +1757,6 @@ def topological_sort(graph):
 
     return result
 
-
 def calculate_project_duration(project_start_date, task_dates):
     """
     Рассчитывает общую длительность проекта в днях
@@ -1682,7 +1806,6 @@ def calculate_project_duration(project_start_date, task_dates):
     except Exception as e:
         print(f"Ошибка при расчете длительности проекта: {str(e)}")
         return 0
-
 
 def identify_critical_path(task_dates, graph, task_map):
     """
@@ -1783,9 +1906,18 @@ def identify_critical_path(task_dates, graph, task_map):
 
     return []
 
-
 def update_database_assignments(task_dates, task_manager, employee_manager=None):
-    """Обновляет назначения сотрудников и даты в базе данных"""
+    """
+    Обновляет назначения сотрудников и даты в базе данных
+
+    Args:
+        task_dates (dict): Словарь с рассчитанными датами и назначениями задач
+        task_manager: Менеджер задач
+        employee_manager: Менеджер сотрудников (опционально)
+
+    Returns:
+        int: Количество обновленных задач
+    """
     print(f"Обновление базы данных для {len(task_dates)} задач...")
     updated_count = 0
 
@@ -1817,7 +1949,20 @@ def update_database_assignments(task_dates, task_manager, employee_manager=None)
                 )
                 date_updates += 1
                 updated_count += 1
-                print(f"Обновлены даты для задачи {numeric_task_id}: {start_date} - {end_date}")
+
+                # Print for debugging key parent tasks
+                is_parent = False
+                try:
+                    task = task_manager.get_task(numeric_task_id)
+                    if task and task.get('is_group'):
+                        is_parent = True
+                except:
+                    pass
+
+                if is_parent:
+                    print(f"Обновлены даты для РОДИТЕЛЬСКОЙ задачи {numeric_task_id}: {start_date} - {end_date}")
+                else:
+                    print(f"Обновлены даты для задачи {numeric_task_id}: {start_date} - {end_date}")
             except Exception as e:
                 print(f"Ошибка при обновлении дат задачи {numeric_task_id}: {str(e)}")
 
@@ -1846,3 +1991,139 @@ def update_database_assignments(task_dates, task_manager, employee_manager=None)
     print(f"Обновлений дат: {date_updates}, обновлений сотрудников: {employee_updates}")
 
     return updated_count
+
+def debug_check_parent_subtask_dates(task_dates, task_map, task_manager):
+    """
+    Performs a final verification of parent-subtask date relationships
+    and fixes any inconsistencies before database update
+    """
+    print("\n=== FINAL VERIFICATION OF PARENT-SUBTASK DATES ===")
+    import datetime
+
+    # Get all parent tasks
+    parent_tasks = {}
+    for task_id, task in task_map.items():
+        if task.get('is_group'):
+            parent_tasks[str(task_id)] = task
+
+    print(f"Found {len(parent_tasks)} parent tasks to verify")
+
+    # For each parent, verify all its subtasks
+    for parent_id, parent_task in parent_tasks.items():
+        try:
+            print(f"\nVerifying parent task {parent_id}: {parent_task.get('name', 'Unknown')}")
+
+            # Skip if parent not in task_dates
+            if parent_id not in task_dates:
+                print(f"  WARNING: Parent task {parent_id} not in task_dates, skipping")
+                continue
+
+            # Get parent end date
+            parent_end_str = task_dates[parent_id].get('end')
+            if not parent_end_str:
+                print(f"  WARNING: Parent task {parent_id} has no end date, skipping")
+                continue
+
+            parent_end = datetime.datetime.strptime(parent_end_str, '%Y-%m-%d')
+            print(f"  Parent end date: {parent_end_str}")
+
+            # Get all subtasks of this parent
+            # First check using task_manager
+            subtasks = []
+            try:
+                # Try to get subtasks from database
+                db_subtasks = task_manager.get_subtasks(int(parent_id))
+                if db_subtasks:
+                    subtasks.extend(db_subtasks)
+                    print(f"  Found {len(db_subtasks)} subtasks in database")
+            except Exception as e:
+                print(f"  ERROR getting subtasks from database: {str(e)}")
+
+            # Also check parent_id in task_map
+            for task_id, task in task_map.items():
+                task_parent_id = task.get('parent_id')
+                if not task_parent_id:
+                    continue
+
+                # Check if this task's parent matches our current parent
+                if str(task_parent_id) == parent_id or task_parent_id == int(parent_id):
+                    if not any(str(s.get('id', '')) == str(task_id) for s in subtasks):
+                        subtasks.append(task)
+                        print(f"  Found additional subtask in task_map: {task_id} - {task.get('name', 'Unknown')}")
+
+            if not subtasks:
+                print(f"  WARNING: No subtasks found for parent {parent_id}")
+                continue
+
+            # Check end date of each subtask
+            latest_end = parent_end
+            latest_subtask_id = None
+            latest_end_str = parent_end_str
+
+            for subtask in subtasks:
+                subtask_id = str(subtask.get('id', ''))
+                if not subtask_id:
+                    continue
+
+                # Get subtask end date from task_dates
+                subtask_end_str = None
+                if subtask_id in task_dates and 'end' in task_dates[subtask_id]:
+                    subtask_end_str = task_dates[subtask_id]['end']
+                else:
+                    # Try numeric ID
+                    try:
+                        numeric_id = int(subtask_id)
+                        if numeric_id in task_dates and 'end' in task_dates[numeric_id]:
+                            subtask_end_str = task_dates[numeric_id]['end']
+                    except (ValueError, TypeError):
+                        pass
+
+                # If still not found, try getting from the subtask directly
+                if not subtask_end_str and subtask.get('end_date'):
+                    subtask_end_str = subtask['end_date']
+
+                # Skip if no end date found
+                if not subtask_end_str:
+                    print(f"  WARNING: Subtask {subtask_id} has no end date")
+                    continue
+
+                print(f"  Subtask {subtask_id}: {subtask.get('name', 'Unknown')}, end date: {subtask_end_str}")
+
+                # Compare with parent end date
+                try:
+                    subtask_end = datetime.datetime.strptime(subtask_end_str, '%Y-%m-%d')
+
+                    # Check if this subtask ends later than current latest
+                    if subtask_end > latest_end:
+                        latest_end = subtask_end
+                        latest_subtask_id = subtask_id
+                        latest_end_str = subtask_end_str
+                        print(f"  NEW LATEST END DATE: {latest_end_str} from subtask {latest_subtask_id}")
+                except ValueError as e:
+                    print(f"  ERROR parsing subtask end date: {str(e)}")
+
+            # Update parent end date if needed
+            if latest_end > parent_end:
+                print(
+                    f"  ⚠️ MISMATCH DETECTED: Parent ends {parent_end_str}, but subtask {latest_subtask_id} ends {latest_end_str}")
+
+                # Update parent end date in task_dates
+                task_dates[parent_id]['end'] = latest_end_str
+                print(f"  ✅ CORRECTED: Updated parent {parent_id} end date to {latest_end_str}")
+
+                # Directly update in database as well for extra certainty
+                try:
+                    task_manager.db.execute(
+                        "UPDATE tasks SET end_date = ? WHERE id = ?",
+                        (latest_end_str, int(parent_id))
+                    )
+                    print(f"  ✅ COMMITTED: Direct database update for parent {parent_id}")
+                except Exception as e:
+                    print(f"  ERROR updating database: {str(e)}")
+            else:
+                print(f"  ✓ VERIFIED: Parent end date {parent_end_str} correctly encompasses all subtasks")
+
+        except Exception as e:
+            print(f"ERROR verifying parent {parent_id}: {str(e)}")
+
+    print("=== END VERIFICATION ===\n")

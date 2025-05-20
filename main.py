@@ -156,6 +156,50 @@ async def cmd_cancel(message: Message, state: FSMContext):
     )
     await message.answer(help_text)
 
+
+@router.callback_query(lambda c: c.data.startswith("delete_project_"))
+async def delete_project_confirm(callback: CallbackQuery):
+    """Запрашивает подтверждение на удаление проекта"""
+    project_id = int(callback.data.split("_")[2])
+
+    try:
+        project = project_manager.get_project_details(project_id)
+
+        # Создаем кнопки для подтверждения удаления
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete_{project_id}")],
+            [InlineKeyboardButton(text="❌ Нет, отмена", callback_data=f"view_project_{project_id}")]
+        ])
+
+        await callback.message.edit_text(
+            f"⚠️ Вы уверены, что хотите удалить проект '{project['name']}'?\n\n"
+            f"Это действие нельзя отменить. Все задачи проекта также будут удалены.",
+            reply_markup=markup
+        )
+    except Exception as e:
+        await callback.message.edit_text(f"Ошибка при подготовке удаления проекта: {str(e)}")
+
+
+@router.callback_query(lambda c: c.data.startswith("confirm_delete_"))
+async def delete_project_execute(callback: CallbackQuery):
+    """Выполняет удаление проекта после подтверждения"""
+    project_id = int(callback.data.split("_")[2])
+
+    try:
+        project_name = project_manager.get_project_details(project_id)['name']
+
+        # Удаляем проект
+        project_manager.delete_project(project_id)
+
+        await callback.message.edit_text(
+            f"✅ Проект '{project_name}' успешно удален.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Вернуться к списку проектов", callback_data="back_to_projects")]
+            ])
+        )
+    except Exception as e:
+        await callback.message.edit_text(f"Ошибка при удалении проекта: {str(e)}")
+
 # -----------------------------------------------------------------------------
 # Административные функции
 # -----------------------------------------------------------------------------
@@ -417,7 +461,24 @@ async def process_start_date(message: Message, state: FSMContext):
     # Проверяем корректность формата даты
     try:
         # Пытаемся распарсить дату
-        datetime.datetime.strptime(start_date, '%Y-%m-%d')
+        date_obj = datetime.datetime.strptime(start_date, '%Y-%m-%d')
+
+        # Проверка на прошлую дату (опционально)
+        if date_obj < datetime.datetime.now():
+            await message.answer(
+                "⚠️ Предупреждение: Указанная дата находится в прошлом. "
+                "Это допустимо, но может привести к некорректному планированию. "
+                "Вы уверены, что хотите продолжить с этой датой?"
+            )
+
+        # Проверка на слишком отдаленную дату (например, более года вперед)
+        future_threshold = datetime.datetime.now() + datetime.timedelta(days=365)
+        if date_obj > future_threshold:
+            await message.answer(
+                "⚠️ Предупреждение: Указанная дата находится слишком далеко в будущем "
+                "(более года). Это допустимо, но может вызвать проблемы с планированием. "
+                "Продолжаем работу с этой датой."
+            )
 
         # Если дата корректна, сохраняем её и предлагаем выбор типа проекта
         await state.update_data(start_date=start_date)
@@ -517,11 +578,121 @@ async def process_csv_file(message: Message, state: FSMContext):
 
         user_data = await state.get_data()
         csv_content = downloaded_file.read().decode('utf-8')
-        project_data = parse_csv(csv_content)
 
-        # Исправляем эту строку: используем message вместо callback
-        user_id = message.from_user.id
-        print(f"Создание проекта из CSV. Пользователь ID: {user_id}")
+        # Проверка CSV на наличие минимум одной строки с данными
+        if csv_content.strip().count('\n') < 1:
+            await message.answer(
+                "⚠️ Предупреждение: Загруженный CSV-файл не содержит данных о задачах. "
+                "Пожалуйста, проверьте файл и загрузите его повторно."
+            )
+            return
+
+        try:
+            project_data, errors = parse_csv(csv_content)
+
+            # Если есть ошибки, выводим предупреждение
+            if errors:
+                error_message = "⚠️ В CSV-файле обнаружены следующие проблемы:\n"
+                for i, error in enumerate(errors[:5]):  # Показываем только первые 5 ошибок
+                    error_message += f"• {error}\n"
+
+                if len(errors) > 5:
+                    error_message += f"...и еще {len(errors) - 5} проблем\n"
+
+                if project_data:  # Если удалось разобрать хотя бы часть задач
+                    error_message += f"\nВсего удалось разобрать {len(project_data)} задач. "
+                    error_message += "Вы хотите продолжить создание проекта с этими задачами или загрузить исправленный файл?"
+
+                    # Предоставляем пользователю выбор: продолжить или загрузить заново
+                    markup = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="✅ Продолжить с текущими задачами",
+                                              callback_data="continue_with_tasks")],
+                        [InlineKeyboardButton(text="🔄 Загрузить исправленный файл", callback_data="reupload_csv")]
+                    ])
+
+                    # Сохраняем разобранные данные для использования в обработчике callback
+                    await state.update_data(parsed_project_data=project_data)
+
+                    await message.answer(error_message, reply_markup=markup)
+                    return
+                else:  # Если не удалось разобрать ни одной задачи
+                    error_message += "\nПожалуйста, исправьте ошибки и загрузите файл повторно."
+                    await message.answer(error_message)
+                    return
+
+            # Проверка на пустой список задач
+            if not project_data:
+                await message.answer(
+                    "❌ В файле не найдены корректные данные о задачах. Пожалуйста, проверьте формат файла."
+                )
+                return
+
+            # Проверка на слишком большое количество задач
+            if len(project_data) > 200:  # Пример порогового значения
+                await message.answer(
+                    f"⚠️ Предупреждение: CSV-файл содержит {len(project_data)} задач, что может привести "
+                    f"к длительным расчетам. Расчет календарного плана может занять значительное время."
+                )
+
+            user_id = message.from_user.id
+            print(f"Создание проекта из CSV. Пользователь ID: {user_id}")
+
+            project_id = project_manager.create_from_csv(
+                user_data['project_name'],
+                user_data['start_date'],
+                project_data,
+                user_id=user_id
+            )
+
+            # Создаем кнопку для перехода к проекту
+            buttons = [
+                [InlineKeyboardButton(text="📂 Открыть проект", callback_data=f"view_project_{project_id}")],
+                [InlineKeyboardButton(text="📋 Список всех проектов", callback_data="back_to_projects")]
+            ]
+            markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+            await message.answer(
+                f"✅ Проект '{user_data['project_name']}' успешно создан из CSV!\n\n"
+                f"ID проекта: {project_id}\n\n"
+                f"Загружено {len(project_data)} задач. Теперь вы можете просмотреть проект и рассчитать календарный план.",
+                reply_markup=markup
+            )
+
+            # Очищаем состояние
+            await state.clear()
+
+        except ValueError as e:
+            await message.answer(
+                f"❌ Ошибка при обработке CSV: {str(e)}\n\n"
+                f"Пожалуйста, проверьте формат файла и убедитесь, что все обязательные поля заполнены "
+                f"корректно, особенно поле 'Длительность', которое должно содержать положительное целое число."
+            )
+            # Оставляем пользователя в том же состоянии, чтобы он мог загрузить файл заново
+    except UnicodeDecodeError:
+        await message.answer(
+            "❌ Не удалось декодировать CSV-файл. Убедитесь, что файл сохранен в кодировке UTF-8. "
+            "Обычно это можно сделать при сохранении файла из Excel или другого редактора."
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при обработке CSV: {str(e)}\n\nПроверьте формат файла и попробуйте снова.")
+
+
+@router.callback_query(F.data == "continue_with_tasks")
+async def continue_with_tasks(callback: CallbackQuery, state: FSMContext):
+    """Продолжает создание проекта с уже разобранными задачами"""
+    try:
+        # Получаем данные из состояния
+        user_data = await state.get_data()
+        project_data = user_data.get('parsed_project_data', [])
+
+        if not project_data:
+            await callback.message.edit_text(
+                "❌ Не удалось найти разобранные данные. Пожалуйста, загрузите CSV-файл заново."
+            )
+            return
+
+        user_id = callback.from_user.id
+        print(f"Продолжение создания проекта из CSV. Пользователь ID: {user_id}")
 
         project_id = project_manager.create_from_csv(
             user_data['project_name'],
@@ -537,16 +708,42 @@ async def process_csv_file(message: Message, state: FSMContext):
         ]
         markup = InlineKeyboardMarkup(inline_keyboard=buttons)
 
-        await message.answer(
+        await callback.message.edit_text(
             f"✅ Проект '{user_data['project_name']}' успешно создан из CSV!\n\n"
             f"ID проекта: {project_id}\n\n"
             f"Загружено {len(project_data)} задач. Теперь вы можете просмотреть проект и рассчитать календарный план.",
             reply_markup=markup
         )
-    except Exception as e:
-        await message.answer(f"Ошибка при обработке CSV: {str(e)}")
 
-    await state.clear()
+        # Очищаем состояние
+        await state.clear()
+
+    except Exception as e:
+        await callback.message.edit_text(f"❌ Ошибка при создании проекта: {str(e)}")
+        await state.clear()
+
+
+@router.callback_query(F.data == "reupload_csv")
+async def reupload_csv(callback: CallbackQuery, state: FSMContext):
+    """Позволяет пользователю загрузить CSV-файл заново"""
+    await callback.message.edit_text(
+        "Пожалуйста, загрузите исправленный CSV-файл с данными проекта.\n\n"
+        "Убедитесь, что все поля правильно заполнены:\n"
+        "- Задача - Название задачи (обязательно)\n"
+        "- Длительность - Целое положительное число (обязательно)\n"
+        "- Тип - Тип задачи ('групповая' или оставьте пустым)\n"
+        "- Должность - Требуемая должность для выполнения задачи\n"
+        "- Предшественники - Список предшествующих задач через запятую\n"
+        "- Родительская задача - Для подзадач указывается название родительской задачи\n"
+        "- Параллельная - Для подзадач указывается 'да'/'нет' (возможность параллельного выполнения)"
+    )
+
+    # Оставляем пользователя в том же состоянии для повторной загрузки
+    # Но удаляем предыдущие результаты парсинга
+    current_data = await state.get_data()
+    if 'parsed_project_data' in current_data:
+        filtered_data = {k: v for k, v in current_data.items() if k != 'parsed_project_data'}
+        await state.set_data(filtered_data)
 
 @router.message(Command("list_projects"))
 async def cmd_list_projects(message: Message):
@@ -613,6 +810,10 @@ async def view_project_callback(callback: CallbackQuery):
         else:
             text += "Задач в проекте нет"
 
+        # Проверяем, был ли рассчитан календарный план
+        # Проверяем наличие дат у задач проекта
+        has_calculated_dates = any(task.get('start_date') is not None for task in tasks)
+
         # Проверяем длину текста и отправляем соответствующим образом
         if len(text) > 3500:  # Лимит Telegram с запасом
             # Создаем временный файл
@@ -641,13 +842,26 @@ async def view_project_callback(callback: CallbackQuery):
                 caption=f"Детали проекта '{project_info['name']}'"
             )
 
-            # Отправляем кнопки
+            # Формируем кнопки в зависимости от статуса расчета
             buttons = [
                 [InlineKeyboardButton(text="📊 Рассчитать календарный план", callback_data=f"calculate_{project_id}")],
-                [InlineKeyboardButton(text="👥 Распределение по сотрудникам", callback_data=f"workload_{project_id}")],
-                [InlineKeyboardButton(text="🔄 Экспорт в Jira", callback_data=f"export_jira_{project_id}")],
-                [InlineKeyboardButton(text="⬅️ Назад к списку проектов", callback_data="back_to_projects")]
             ]
+
+            # Добавляем кнопку распределения только если был выполнен расчет
+            if has_calculated_dates:
+                buttons.append([InlineKeyboardButton(text="👥 Распределение по сотрудникам",
+                                                     callback_data=f"workload_{project_id}")])
+                # Добавляем кнопку экспорта в Jira
+                buttons.append([InlineKeyboardButton(text="🔄 Экспорт в Jira",
+                                                 callback_data=f"export_jira_{project_id}")])
+
+            # Добавляем кнопку удаления проекта
+            buttons.append([InlineKeyboardButton(text="🗑️ Удалить проект",
+                                                 callback_data=f"delete_project_{project_id}")])
+
+            # Добавляем кнопку возврата к списку проектов
+            buttons.append([InlineKeyboardButton(text="⬅️ Назад к списку проектов",
+                                                 callback_data="back_to_projects")])
 
             markup = InlineKeyboardMarkup(inline_keyboard=buttons)
             await callback.message.reply("Выберите действие:", reply_markup=markup)
@@ -661,11 +875,24 @@ async def view_project_callback(callback: CallbackQuery):
         else:
             # Если текст не слишком длинный, отправляем обычным сообщением
             buttons = [
-                [InlineKeyboardButton(text="📊 Рассчитать календарный план", callback_data=f"calculate_{project_id}")],
-                [InlineKeyboardButton(text="👥 Распределение по сотрудникам", callback_data=f"workload_{project_id}")],
-                [InlineKeyboardButton(text="🔄 Экспорт в Jira", callback_data=f"export_jira_{project_id}")],
-                [InlineKeyboardButton(text="⬅️ Назад к списку проектов", callback_data="back_to_projects")]
+                [InlineKeyboardButton(text="📊 Рассчитать календарный план", callback_data=f"calculate_{project_id}")]
             ]
+
+            # Добавляем кнопку распределения только если был выполнен расчет
+            if has_calculated_dates:
+                buttons.append([InlineKeyboardButton(text="👥 Распределение по сотрудникам",
+                                                     callback_data=f"workload_{project_id}")])
+                # Добавляем кнопку экспорта в Jira
+                buttons.append([InlineKeyboardButton(text="🔄 Экспорт в Jira",
+                                                     callback_data=f"export_jira_{project_id}")])
+
+            # Добавляем кнопку удаления проекта
+            buttons.append([InlineKeyboardButton(text="🗑️ Удалить проект",
+                                                 callback_data=f"delete_project_{project_id}")])
+
+            # Добавляем кнопку возврата к списку проектов
+            buttons.append([InlineKeyboardButton(text="⬅️ Назад к списку проектов",
+                                                 callback_data="back_to_projects")])
 
             markup = InlineKeyboardMarkup(inline_keyboard=buttons)
             await callback.message.edit_text(text, reply_markup=markup)
@@ -708,15 +935,79 @@ async def calculate_schedule(callback: CallbackQuery):
         project = project_manager.get_project_details(project_id)
         tasks = task_manager.get_tasks_by_project(project_id)
 
+        # Проверка наличия задач
+        if not tasks:
+            await callback.message.edit_text(
+                "⚠️ В проекте не найдено ни одной задачи. Расчет календарного плана невозможен.\n\n"
+                "Пожалуйста, добавьте задачи в проект и попробуйте снова."
+            )
+
+            # Добавляем кнопку для возврата к проекту
+            markup = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Назад к проекту", callback_data=f"view_project_{project_id}")]
+            ])
+            await callback.message.reply("", reply_markup=markup)
+            return
+
+        # Проверка наличия зависимостей
+        has_dependencies = False
+        for task in tasks:
+            if task.get('predecessors') and task['predecessors']:
+                has_dependencies = True
+                break
+
+        if not has_dependencies:
+            await callback.message.reply(
+                "⚠️ Предупреждение: В проекте не найдено зависимостей между задачами. "
+                "Все задачи будут запланированы параллельно, начиная с даты начала проекта. "
+                "Это может не соответствовать реальному процессу выполнения.\n\n"
+                "Расчет календарного плана продолжается..."
+            )
+
+        # Проверка наличия должностей для задач
+        tasks_without_position = []
+        for task in tasks:
+            if not task.get('position') and not task.get('is_group'):
+                tasks_without_position.append(task.get('name', f"Задача ID: {task['id']}"))
+
+        if tasks_without_position:
+            warning_text = "⚠️ Для следующих задач не указана требуемая должность сотрудника:\n"
+            for i, task_name in enumerate(tasks_without_position[:5]):
+                warning_text += f"- {task_name}\n"
+
+            if len(tasks_without_position) > 5:
+                warning_text += f"...и еще {len(tasks_without_position) - 5} задач\n"
+
+            warning_text += "\nЭти задачи не будут автоматически назначены на сотрудников. "
+            warning_text += "Вы можете назначить сотрудников вручную после расчета календарного плана."
+
+            await callback.message.reply(warning_text)
+
         # Дополнительно получаем все задачи проекта, включая подзадачи
         all_tasks = task_manager.get_all_tasks_by_project(project_id)
         print(f"Получено {len(tasks)} основных задач и {len(all_tasks)} задач всего (включая подзадачи)")
+
+        # Проверка на наличие циклических зависимостей
+        try:
+            # Создаем временный экземпляр NetworkModel для проверки
+            temp_network = NetworkModel()
+            temp_graph = temp_network._build_graph(all_tasks)
+
+            if temp_network._has_cycle():
+                await callback.message.reply(
+                    "⚠️ В проекте обнаружены циклические зависимости между задачами! "
+                    "Такие зависимости могут привести к некорректному расчету календарного плана.\n\n"
+                    "Рекомендуется проверить и исправить зависимости между задачами."
+                )
+        except Exception as e:
+            print(f"Ошибка при проверке циклических зависимостей: {str(e)}")
 
         # Выполняем расчет календарного плана с учетом выходных дней
         result = schedule_project(project, tasks, task_manager, employee_manager)
         print(f"Updating database with calculated dates for {len(result['task_dates'])} tasks...")
         update_count = update_database_assignments(result['task_dates'], task_manager, employee_manager)
         print(f"Successfully updated {update_count} tasks in database")
+
         # Создаем словарь задач для передачи в функцию балансировки
         task_map = {}
         for task in all_tasks:  # Используем все задачи, включая подзадачи
@@ -727,6 +1018,8 @@ async def calculate_schedule(callback: CallbackQuery):
 
         print(f"Создан словарь task_map с {len(task_map)} задачами")
         debug_check_parent_subtask_dates(result['task_dates'], task_map, task_manager)
+        update_count = update_database_assignments(result['task_dates'], task_manager, employee_manager)
+
         # Формируем результаты для отображения
         task_dates = result['task_dates']
         critical_path = result['critical_path']
@@ -737,9 +1030,21 @@ async def calculate_schedule(callback: CallbackQuery):
         print(f"Длительность проекта: {duration} дней")
         print(f"Рассчитаны даты для {len(task_dates)} задач")
 
+        # Проверка длительности проекта
+        if duration > 365:
+            await callback.message.reply(
+                f"⚠️ Внимание! Рассчитанная длительность проекта составляет {duration} дней (более года). "
+                f"Это может быть следствием ошибок в данных или неоптимального распределения задач."
+            )
+        elif duration > 180:
+            await callback.message.reply(
+                f"⚠️ Внимание! Рассчитанная длительность проекта составляет {duration} дней (более полугода). "
+                f"Возможно, стоит пересмотреть структуру задач для оптимизации сроков."
+            )
+
         # Генерируем отчет
         print("Формирование отчета...")
-        text = generate_planning_report(project, tasks, result, task_manager, employee_manager)
+        text = generate_planning_report(project, all_tasks, result, task_manager, employee_manager)
 
         # Безопасное имя файла для отчета
         safe_project_name = "".join(c if c.isalnum() or c in [' ', '.', '_', '-'] else '_' for c in project['name'])
@@ -760,6 +1065,9 @@ async def calculate_schedule(callback: CallbackQuery):
             print(traceback.format_exc())
             gantt_image = None
             has_gantt = False
+            await callback.message.reply(
+                "⚠️ Не удалось создать диаграмму Ганта из-за ошибки: " + str(e)
+            )
 
         # Отправляем краткое сообщение
         await callback.message.edit_text(
@@ -1297,11 +1605,91 @@ def calculate_critical_path(task_dates, tasks, task_manager):
 async def export_to_jira(callback: CallbackQuery):
     project_id = int(callback.data.split("_")[2])
 
+    # Спрашиваем подтверждение перед экспортом
+    confirm_markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, экспортировать", callback_data=f"confirm_jira_export_{project_id}")],
+        [InlineKeyboardButton(text="❌ Нет, отменить", callback_data=f"view_project_{project_id}")]
+    ])
+
+    await callback.message.edit_text(
+        "Вы собираетесь экспортировать проект в Jira.\n\n"
+        "⚠️ Обратите внимание:\n"
+        "- Эта операция создаст новые задачи в Jira\n"
+        "- Потребуется некоторое время для завершения\n"
+        "- Необходимо правильно настроенное подключение к Jira\n\n"
+        "Вы хотите продолжить?",
+        reply_markup=confirm_markup
+    )
+
+@router.callback_query(lambda c: c.data.startswith("confirm_jira_export_"))
+async def confirm_jira_export(callback: CallbackQuery):
+    project_id = int(callback.data.split("_")[2])
+
     await callback.message.edit_text("Выполняется экспорт в Jira...")
 
     try:
+        # Проверка настроек Jira
+        jira_url = os.getenv("JIRA_URL")
+        jira_username = os.getenv("JIRA_USERNAME")
+        jira_api_token = os.getenv("JIRA_API_TOKEN")
+
+        if not jira_url or not jira_username or not jira_api_token:
+            await callback.message.edit_text(
+                "❌ Не удалось выполнить экспорт в Jira: отсутствуют необходимые настройки.\n\n"
+                "Администратору необходимо настроить следующие параметры в файле .env:\n"
+                "- JIRA_URL\n"
+                "- JIRA_USERNAME\n"
+                "- JIRA_API_TOKEN"
+            )
+
+            buttons = [
+                [InlineKeyboardButton(text="Назад к проекту", callback_data=f"view_project_{project_id}")]
+            ]
+            markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+            await callback.message.reply("Экспорт отменен", reply_markup=markup)
+            return
+
         project = project_manager.get_project_details(project_id)
         tasks = task_manager.get_all_tasks_by_project(project_id)
+
+        # Проверяем, что у проекта есть задачи
+        if not tasks:
+            await callback.message.edit_text(
+                "⚠️ Проект не содержит задач для экспорта в Jira.\n"
+                "Сначала добавьте задачи в проект и рассчитайте календарный план."
+            )
+
+            buttons = [
+                [InlineKeyboardButton(text="Назад к проекту", callback_data=f"view_project_{project_id}")]
+            ]
+            markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+            await callback.message.reply("Экспорт отменен", reply_markup=markup)
+            return
+
+            # Проверяем, рассчитан ли календарный план
+            tasks_with_dates = 0
+            for task in tasks:
+                if task.get('start_date') and task.get('end_date'):
+                    tasks_with_dates += 1
+
+            if tasks_with_dates == 0:
+                await callback.message.edit_text(
+                    "⚠️ Календарный план не рассчитан. Даты выполнения задач отсутствуют.\n"
+                    "Рекомендуется сначала рассчитать календарный план проекта."
+                )
+
+                buttons = [
+                    [InlineKeyboardButton(text="Рассчитать календарный план", callback_data=f"calculate_{project_id}")],
+                    [InlineKeyboardButton(text="Отменить экспорт", callback_data=f"view_project_{project_id}")]
+                ]
+                markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+                await callback.message.reply("Что вы хотите сделать?", reply_markup=markup)
+                return
+            elif tasks_with_dates < len(tasks):
+                await callback.message.reply(
+                    f"⚠️ Предупреждение: Только {tasks_with_dates} из {len(tasks)} задач имеют рассчитанные даты. "
+                    f"Остальные задачи будут экспортированы без дат начала и окончания."
+                )
 
         # Пробуем прямую интеграцию с Jira API
         result = jira_exporter.import_to_jira(project, tasks, employee_manager)
@@ -1317,7 +1705,15 @@ async def export_to_jira(callback: CallbackQuery):
             await callback.message.edit_text(message_text)
         else:
             # Если API не сработал, отправляем файл
+            error_details = result.get('error', 'Неизвестная ошибка')
             file = FSInputFile(result['csv_export_file'])
+
+            await callback.message.edit_text(
+                f"⚠️ Экспорт в Jira через API не удался.\n\n"
+                f"Причина: {error_details}\n\n"
+                f"В качестве альтернативы был создан CSV-файл для ручного импорта в Jira."
+            )
+
             await bot.send_document(
                 callback.from_user.id,
                 file,
@@ -1336,7 +1732,74 @@ async def export_to_jira(callback: CallbackQuery):
         await callback.message.reply("Экспорт завершен", reply_markup=markup)
 
     except Exception as e:
-        await callback.message.edit_text(f"Ошибка при экспорте в Jira: {str(e)}")
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"Подробная ошибка при экспорте в Jira:\n{error_details}")
+
+        # Определяем тип ошибки для более информативного сообщения
+        error_message = str(e)
+        if "Connection" in error_message or "timeout" in error_message.lower():
+            user_error = "Не удалось подключиться к серверу Jira. Проверьте доступность сервера и сетевое подключение."
+        elif "Authentication" in error_message or "credentials" in error_message.lower() or "401" in error_message:
+            user_error = "Ошибка аутентификации. Проверьте правильность логина и токена API для Jira."
+        elif "Permission" in error_message or "403" in error_message:
+            user_error = "Недостаточно прав для создания задач в Jira. Обратитесь к администратору Jira."
+        else:
+            user_error = f"Произошла ошибка при экспорте: {str(e)}"
+
+        await callback.message.edit_text(
+            f"❌ {user_error}\n\n"
+            f"Попробуйте повторить операцию позже или обратитесь к администратору системы."
+        )
+
+        # Предлагаем альтернативное решение - экспорт в CSV
+        try:
+            temp_dir = tempfile.mkdtemp()
+            csv_file_path = os.path.join(temp_dir, f"{project['name']}_export.csv")
+
+            # Создаем CSV-файл
+            with open(csv_file_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['ID', 'Название', 'Длительность', 'Дата начала', 'Дата окончания', 'Предшественники'])
+
+                for task in tasks:
+                    writer.writerow([
+                        task['id'],
+                        task['name'],
+                        task.get('duration', ''),
+                        task.get('start_date', ''),
+                        task.get('end_date', ''),
+                        json.dumps(task.get('predecessors', []))
+                    ])
+
+            file = FSInputFile(csv_file_path)
+            await bot.send_document(
+                callback.from_user.id,
+                file,
+                caption=f"CSV-файл с задачами проекта '{project['name']}' для ручного импорта"
+            )
+
+            buttons = [
+                [InlineKeyboardButton(text="Назад к проекту", callback_data=f"view_project_{project_id}")]
+            ]
+            markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+            await callback.message.reply("Экспорт в CSV выполнен", reply_markup=markup)
+
+            # Очистка временного файла
+            try:
+                if os.path.exists(csv_file_path):
+                    os.remove(csv_file_path)
+                os.rmdir(temp_dir)
+            except:
+                pass
+
+        except Exception as csv_error:
+            print(f"Ошибка при создании CSV: {str(csv_error)}")
+            buttons = [
+                [InlineKeyboardButton(text="Назад к проекту", callback_data=f"view_project_{project_id}")]
+            ]
+            markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+            await callback.message.reply("Не удалось создать CSV-файл", reply_markup=markup)
 
 
 # -----------------------------------------------------------------------------
@@ -1400,6 +1863,27 @@ async def show_workload_report(callback, project_id, employee_manager, project, 
         all_tasks = task_manager.get_all_tasks_by_project(project_id)
         print(f"Всего задач в проекте: {len(all_tasks)}")
 
+        # Проверяем, есть ли задачи с назначенными сотрудниками
+        tasks_with_employees = 0
+        for task in all_tasks:
+            if task.get('employee_id'):
+                tasks_with_employees += 1
+
+        if tasks_with_employees == 0:
+            await callback.message.edit_text(
+                f"⚠️ В проекте '{project['name']}' не найдено задач с назначенными сотрудниками.\n\n"
+                f"Для получения отчета о распределении сначала рассчитайте календарный план проекта "
+                f"или назначьте сотрудников на задачи вручную."
+            )
+
+            # Кнопки для дальнейших действий
+            markup = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Рассчитать календарный план", callback_data=f"calculate_{project_id}")],
+                [InlineKeyboardButton(text="Назад к проекту", callback_data=f"view_project_{project_id}")]
+            ])
+            await callback.message.reply("Что вы хотите сделать?", reply_markup=markup)
+            return
+
         # Для диагностики выводим информацию о датах задач
         for task in all_tasks:
             print(
@@ -1407,6 +1891,25 @@ async def show_workload_report(callback, project_id, employee_manager, project, 
 
         # Генерируем отчет о распределении задач
         report = employee_manager.generate_workload_report(project_id)
+
+        # Проверяем, есть ли информация в отчете
+        if "Ни одной задачи не назначено на сотрудников" in report:
+            await callback.message.edit_text(
+                f"⚠️ В проекте '{project['name']}' отсутствует информация о распределении задач по сотрудникам.\n\n"
+                f"Возможные причины:\n"
+                f"- Не рассчитан календарный план\n"
+                f"- Не указаны должности для задач\n"
+                f"- Отсутствуют подходящие сотрудники для задач\n\n"
+                f"Рекомендуется рассчитать календарный план с автоматическим распределением задач "
+                f"или назначить сотрудников на задачи вручную."
+            )
+
+            markup = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Рассчитать календарный план", callback_data=f"calculate_{project_id}")],
+                [InlineKeyboardButton(text="Назад к проекту", callback_data=f"view_project_{project_id}")]
+            ])
+            await callback.message.reply("Что вы хотите сделать?", reply_markup=markup)
+            return
 
         # Проверяем длину отчета
         if len(report) <= 4000:  # Оставляем запас до лимита в 4096 символов
@@ -1480,10 +1983,16 @@ async def show_workload_report(callback, project_id, employee_manager, project, 
                     print(f"Диаграмма загрузки успешно создана и отправлена")
                 else:
                     print(f"Ошибка: файл диаграммы загрузки не найден по пути: {workload_image}")
+                    await callback.message.answer(
+                        "⚠️ Не удалось создать диаграмму загрузки сотрудников из-за технической ошибки."
+                    )
             except Exception as e:
                 print(f"Ошибка при создании диаграммы загрузки: {str(e)}")
                 import traceback
                 print(traceback.format_exc())
+                await callback.message.answer(
+                    f"⚠️ Не удалось создать диаграмму загрузки сотрудников: {str(e)}"
+                )
 
     except Exception as e:
         import traceback
@@ -1491,7 +2000,7 @@ async def show_workload_report(callback, project_id, employee_manager, project, 
         print(error_msg)
 
         # Отправляем укороченное сообщение об ошибке
-        short_error = f"Ошибка при получении распределения задач: {str(e)}"
+        short_error = f"❌ Ошибка при получении распределения задач: {str(e)}"
         await callback.message.edit_text(
             short_error,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[

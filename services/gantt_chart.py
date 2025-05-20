@@ -81,7 +81,7 @@ class GanttChart:
 
             # Создаем запись для DataFrame
             data.append({
-                'Task': f"{task_name} ({duration} дн.)",
+                'Task': f"{task_name}",
                 'Start': start_dt,
                 'End': end_dt,
                 'Duration': actual_duration,

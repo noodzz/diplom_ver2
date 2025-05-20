@@ -15,73 +15,102 @@ def parse_csv(csv_content):
         list: Список словарей с данными о задачах
     """
     tasks = []
+    errors = []  # Для сбора ошибок
 
     csv_file = io.StringIO(csv_content)
     reader = csv.DictReader(csv_file)
 
     # Словарь для отслеживания групповых задач
     group_tasks = {}
+    row_number = 1  # Для отслеживания номеров строк
 
     for row in reader:
-        task = {
-            "name": row.get("Задача", "").strip(),
-            "duration": int(row.get("Длительность", 0)),
-            "is_group": row.get("Тип", "").lower().strip() == "групповая",
-            "position": row.get("Должность", "").strip(),
-        }
+        row_number += 1
+        try:
+            # Проверка наличия обязательных полей
+            if "Задача" not in row or not row.get("Задача", "").strip():
+                errors.append(f"Строка {row_number}: отсутствует название задачи")
+                continue
+            # Обработка длительности с проверкой на пустое значение
+            duration_str = row.get("Длительность", "").strip()
+            if not duration_str:
+                errors.append(f"Строка {row_number}: отсутствует длительность для задачи '{row.get('Задача', '')}'")
+                continue
 
-        # Обрабатываем предшественников
-        predecessors_str = row.get("Предшественники", "").strip()
-        if predecessors_str:
-            task["predecessors"] = [pred.strip() for pred in predecessors_str.split(',')]
-        else:
-            task["predecessors"] = []
+            try:
+                duration = int(duration_str)
+                if duration <= 0:
+                    errors.append(
+                        f"Строка {row_number}: некорректная длительность ({duration_str}) для задачи '{row.get('Задача', '')}'")
+                    continue
+            except ValueError:
+                errors.append(
+                    f"Строка {row_number}: длительность '{duration_str}' для задачи '{row.get('Задача', '')}' должна быть целым числом")
+                continue
 
-        # Обрабатываем групповые задачи
-        parent_task = row.get("Родительская задача", "").strip()
-        if parent_task:
-            # Это подзадача
-            if parent_task not in group_tasks:
-                # Создаем родительскую задачу, если ее еще нет
-                group_task = {
-                    "name": parent_task,
-                    "duration": 0,  # Будет рассчитано позже
-                    "is_group": True,
-                    "predecessors": [],
-                    "subtasks": []
-                }
-                group_tasks[parent_task] = group_task
-                tasks.append(group_task)
-
-            # Добавляем подзадачу
-            subtask = {
-                "name": task["name"],
-                "duration": task["duration"],
-                "position": task["position"],
-                "parallel": row.get("Параллельная", "").lower().strip() in ("да", "yes", "true", "1")
+            task = {
+                "name": row.get("Задача", "").strip(),
+                "duration": int(row.get("Длительность", 0)),
+                "is_group": row.get("Тип", "").lower().strip() == "групповая",
+                "position": row.get("Должность", "").strip(),
             }
 
-            group_tasks[parent_task]["subtasks"].append(subtask)
-
-            # Обновляем длительность групповой задачи
-            if subtask["parallel"]:
-                # При параллельном выполнении берем максимальную длительность
-                group_tasks[parent_task]["duration"] = max(
-                    group_tasks[parent_task]["duration"],
-                    subtask["duration"]
-                )
+            # Обрабатываем предшественников
+            predecessors_str = row.get("Предшественники", "").strip()
+            if predecessors_str:
+                task["predecessors"] = [pred.strip() for pred in predecessors_str.split(',')]
             else:
-                # При последовательном выполнении суммируем длительности
-                group_tasks[parent_task]["duration"] += subtask["duration"]
-        else:
-            # Это обычная задача или новая групповая задача
-            if task["is_group"]:
-                task["subtasks"] = []
-                group_tasks[task["name"]] = task
+                task["predecessors"] = []
 
-            tasks.append(task)
+            # Обрабатываем групповые задачи
+            parent_task = row.get("Родительская задача", "").strip()
+            if parent_task:
+                # Это подзадача
+                if parent_task not in group_tasks:
+                    # Создаем родительскую задачу, если ее еще нет
+                    group_task = {
+                        "name": parent_task,
+                        "duration": 0,  # Будет рассчитано позже
+                        "is_group": True,
+                        "predecessors": [],
+                        "subtasks": []
+                    }
+                    group_tasks[parent_task] = group_task
+                    tasks.append(group_task)
 
-    return tasks
+                # Добавляем подзадачу
+                subtask = {
+                    "name": task["name"],
+                    "duration": task["duration"],
+                    "position": task["position"],
+                    "parallel": row.get("Параллельная", "").lower().strip() in ("да", "yes", "true", "1")
+                }
+
+                group_tasks[parent_task]["subtasks"].append(subtask)
+
+                # Обновляем длительность групповой задачи
+                if subtask["parallel"]:
+                    # При параллельном выполнении берем максимальную длительность
+                    group_tasks[parent_task]["duration"] = max(
+                        group_tasks[parent_task]["duration"],
+                        subtask["duration"]
+                    )
+                else:
+                    # При последовательном выполнении суммируем длительности
+                    group_tasks[parent_task]["duration"] += subtask["duration"]
+            else:
+                # Это обычная задача или новая групповая задача
+                if task["is_group"]:
+                    task["subtasks"] = []
+                    group_tasks[task["name"]] = task
+
+                tasks.append(task)
+        except Exception as e:
+            errors.append(f"Строка {row_number}: ошибка обработки: {str(e)}")
+    if errors and not tasks:
+        # Если есть ошибки и не удалось создать ни одной задачи
+        raise ValueError("\n".join(errors))
+    return tasks, errors
 
 
 def format_date(date_str):

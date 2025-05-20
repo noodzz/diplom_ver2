@@ -252,30 +252,44 @@ class NetworkModel:
         """
         visited = set()
         rec_stack = set()
+        cycles = []  # Для хранения найденных циклов
 
-        # Создаем копию графа для безопасной итерации
-        graph_copy = {k: list(v) for k, v in self.graph.items()}
+        def dfs(node, path=None):
+            if path is None:
+                path = []
 
-        def dfs(node):
             visited.add(node)
             rec_stack.add(node)
+            path.append(node)
 
-            for neighbor, _ in graph_copy.get(node, []):
+            for neighbor, _ in self.graph.get(node, []):
                 if neighbor not in visited:
-                    if dfs(neighbor):
+                    if dfs(neighbor, path[:]):
                         return True
                 elif neighbor in rec_stack:
+                    # Цикл найден, сохраняем его
+                    cycle_path = path[path.index(neighbor):] + [neighbor]
+                    cycles.append(cycle_path)
                     return True
 
             rec_stack.remove(node)
             return False
 
         # Создаем копию ключей для безопасной итерации
-        graph_nodes = list(graph_copy.keys())
+        graph_nodes = list(self.graph.keys())
 
         for node in graph_nodes:
             if node not in visited:
                 if dfs(node):
+                    # Выводим найденные циклы для отладки
+                    print("Обнаружены циклические зависимости в графе задач:")
+                    for cycle in cycles:
+                        cycle_tasks = []
+                        for node_id in cycle:
+                            if node_id in self.reverse_mapping:
+                                task_id = self.reverse_mapping[node_id]
+                                cycle_tasks.append(f"{task_id}" if task_id != 'sink' else 'конец')
+                        print(f"  Цикл: {' -> '.join(cycle_tasks)}")
                     return True
 
         return False

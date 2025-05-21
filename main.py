@@ -979,7 +979,6 @@ async def calculate_schedule(callback: CallbackQuery):
                 warning_text += f"...и еще {len(tasks_without_position) - 5} задач\n"
 
             warning_text += "\nЭти задачи не будут автоматически назначены на сотрудников. "
-            warning_text += "Вы можете назначить сотрудников вручную после расчета календарного плана."
 
             await callback.message.reply(warning_text)
 
@@ -1024,6 +1023,22 @@ async def calculate_schedule(callback: CallbackQuery):
         task_dates = result['task_dates']
         critical_path = result['critical_path']
         duration = result['duration']
+
+        long_tasks = []
+        for task in all_tasks:
+            if task.get('duration', 0) > 100:
+                long_tasks.append(task.get('name', f"Задача {task['id']}"))
+        # Если есть длинные задачи, выводим предупреждение
+        if long_tasks:
+            warning_text = "⚠️ Обнаружены задачи с очень большой длительностью (более 100 дней):\n"
+            for task_name in long_tasks[:5]:  # Показываем первые 5 задач
+                warning_text += f"- {task_name}\n"
+
+            if len(long_tasks) > 5:
+                warning_text += f"...и еще {len(long_tasks) - 5} задач\n"
+
+            warning_text += "\nДля этих задач выходные дни не учитывались при планировании."
+            await callback.message.reply(warning_text)
 
         # Отладочная информация
         print(f"Критический путь: {critical_path}")
@@ -1174,6 +1189,37 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
         text += f"Длительность проекта: {duration} дней\n\n"
 
     text += f"Общее количество задач: {len(tasks)}\n\n"
+
+    # Функция для получения конкретных дат выходных в заданном интервале
+    def get_days_off_in_range(employee_id, start_date_str, end_date_str):
+        try:
+            # Получаем информацию о сотруднике
+            employee = employee_manager.get_employee(employee_id)
+            days_off = employee.get('days_off', [])
+
+            # Преобразуем строковые даты в объекты datetime
+            start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+            end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+
+            # Находим все даты в диапазоне
+            current_date = start_date
+            days_off_dates = []
+
+            while current_date <= end_date:
+                # Проверяем, является ли этот день выходным для сотрудника
+                # Дни недели в Python: 0 = понедельник, 6 = воскресенье
+                # Дни в системе: 1 = понедельник, 7 = воскресенье
+                weekday_in_system = current_date.weekday() + 1
+
+                if weekday_in_system in days_off:
+                    days_off_dates.append(current_date.strftime('%d.%m.%Y'))
+
+                current_date += datetime.timedelta(days=1)
+
+            return days_off_dates
+        except Exception as e:
+            print(f"Ошибка при получении выходных дней: {str(e)}")
+            return []
 
     # Критический путь
     text += f"🚩 КРИТИЧЕСКИЙ ПУТЬ\n"
@@ -1330,6 +1376,15 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
                         start_date = format_date(task['start_date'])
                         end_date = format_date(task['end_date'])
 
+                    # Получаем выходные дни в указанном диапазоне
+                    days_off_dates = []
+                    if start_date != "?" and end_date != "?":
+                        days_off_dates = get_days_off_in_range(employee_id, start_date, end_date)
+
+                    # Форматируем даты для отображения
+                    start_date_display = format_date(start_date)
+                    end_date_display = format_date(end_date)
+
                     # Выводим информацию о задаче
                     task_duration = task.get('duration', 0)
                     total_load += task_duration
@@ -1339,14 +1394,22 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
                         try:
                             parent_task = task_manager.get_task(task['parent_id'])
                             parent_name = parent_task['name'] if parent_task else "Неизвестная задача"
-                            text += f"  • {parent_name} → {task['name']} ({task_duration} дн.)\n"
+                            task_info = f"  • {parent_name} → {task['name']} ({task_duration} дн.)"
                         except Exception as e:
                             print(f"Ошибка при получении родительской задачи {task['parent_id']}: {str(e)}")
-                            text += f"  • {task['name']} ({task_duration} дн.)\n"
+                            task_info = f"  • {task['name']} ({task_duration} дн.)"
                     else:
-                        text += f"  • {task['name']} ({task_duration} дн.)\n"
+                        task_info = f"  • {task['name']} ({task_duration} дн.)"
 
-                    text += f"    Даты: {start_date} - {end_date}\n"
+                    # Добавляем даты задачи и выходные дни
+                    text += f"{task_info}\n"
+                    text += f"    Даты: {start_date_display} - {end_date_display}"
+
+                    # Добавляем информацию о выходных днях
+                    if days_off_dates:
+                        text += f" (выходные - {', '.join(days_off_dates)})"
+
+                    text += "\n"
 
                 # Суммарная нагрузка сотрудника
                 text += f"  Общая нагрузка: {total_load} дней\n\n"
@@ -1623,7 +1686,7 @@ async def export_to_jira(callback: CallbackQuery):
 
 @router.callback_query(lambda c: c.data.startswith("confirm_jira_export_"))
 async def confirm_jira_export(callback: CallbackQuery):
-    project_id = int(callback.data.split("_")[2])
+    project_id = int(callback.data.split("_")[3])
 
     await callback.message.edit_text("Выполняется экспорт в Jira...")
 
@@ -1632,6 +1695,7 @@ async def confirm_jira_export(callback: CallbackQuery):
         jira_url = os.getenv("JIRA_URL")
         jira_username = os.getenv("JIRA_USERNAME")
         jira_api_token = os.getenv("JIRA_API_TOKEN")
+        jira_project = os.getenv("JIRA_PROJECT", "TEC")
 
         if not jira_url or not jira_username or not jira_api_token:
             await callback.message.edit_text(
@@ -1691,6 +1755,96 @@ async def confirm_jira_export(callback: CallbackQuery):
                     f"Остальные задачи будут экспортированы без дат начала и окончания."
                 )
 
+        try:
+            import requests
+            # Проверка соединения через простой запрос
+            headers = {
+                "Accept": "application/json"
+            }
+            auth = (jira_username, jira_api_token)
+
+            connection_test_url = f"{jira_url}/rest/api/2/project/{jira_project}"
+            response = requests.get(connection_test_url, auth=auth, headers=headers, timeout=10)
+
+            if response.status_code == 401 or response.status_code == 403:
+                await callback.message.edit_text(
+                    f"❌ Ошибка аутентификации в Jira!\n\n"
+                    f"Проверьте правильность следующих параметров в настройках:\n"
+                    f"- JIRA_USERNAME (email пользователя)\n"
+                    f"- JIRA_API_TOKEN (токен API)\n\n"
+                    f"Убедитесь, что токен API активен и имеет нужные разрешения."
+                )
+
+                # Альтернативный вариант - CSV файл
+                csv_file_path = create_csv_export(project, tasks)
+
+                file = FSInputFile(csv_file_path)
+                await bot.send_document(
+                    callback.from_user.id,
+                    file,
+                    caption=f"CSV-файл с задачами проекта '{project['name']}' для ручного импорта в Jira"
+                )
+
+                buttons = [
+                    [InlineKeyboardButton(text="Назад к проекту", callback_data=f"view_project_{project_id}")]
+                ]
+                markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+                await callback.message.reply("Экспорт в CSV выполнен", reply_markup=markup)
+                return
+
+            elif response.status_code == 404:
+                await callback.message.edit_text(
+                    f"❌ Ошибка: проект '{jira_project}' не найден в Jira!\n\n"
+                    f"Проверьте настройку JIRA_PROJECT в файле .env. Текущее значение: {jira_project}\n"
+                    f"Используйте ключ существующего проекта Jira."
+                )
+
+                # Альтернативный вариант - CSV файл
+                csv_file_path = create_csv_export(project, tasks)
+
+                file = FSInputFile(csv_file_path)
+                await bot.send_document(
+                    callback.from_user.id,
+                    file,
+                    caption=f"CSV-файл с задачами проекта '{project['name']}' для ручного импорта в Jira"
+                )
+
+                buttons = [
+                    [InlineKeyboardButton(text="Назад к проекту", callback_data=f"view_project_{project_id}")]
+                ]
+                markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+                await callback.message.reply("Экспорт в CSV выполнен", reply_markup=markup)
+                return
+
+            elif response.status_code >= 400:
+                await callback.message.edit_text(
+                    f"❌ Ошибка при подключении к Jira: код {response.status_code}\n\n"
+                    f"Проверьте настройку JIRA_URL в файле .env. Текущее значение: {jira_url}\n"
+                    f"URL должен быть в формате 'https://ваш-домен.atlassian.net'"
+                )
+
+                # Альтернативный вариант - CSV файл
+                csv_file_path = create_csv_export(project, tasks)
+
+                file = FSInputFile(csv_file_path)
+                await bot.send_document(
+                    callback.from_user.id,
+                    file,
+                    caption=f"CSV-файл с задачами проекта '{project['name']}' для ручного импорта в Jira"
+                )
+
+                buttons = [
+                    [InlineKeyboardButton(text="Назад к проекту", callback_data=f"view_project_{project_id}")]
+                ]
+                markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+                await callback.message.reply("Экспорт в CSV выполнен", reply_markup=markup)
+                return
+
+        except Exception as e:
+            # Логируем ошибку для диагностики
+            print(f"Ошибка при тестировании соединения с Jira: {str(e)}")
+            # Продолжаем выполнение, так как это только предварительный тест
+
         # Пробуем прямую интеграцию с Jira API
         result = jira_exporter.import_to_jira(project, tasks, employee_manager)
 
@@ -1706,22 +1860,56 @@ async def confirm_jira_export(callback: CallbackQuery):
         else:
             # Если API не сработал, отправляем файл
             error_details = result.get('error', 'Неизвестная ошибка')
+
+            # Улучшенная диагностика ошибок
+            error_message = "❌ Экспорт в Jira через API не удался.\n\n"
+
+            if "401" in error_details or "authentication" in error_details.lower():
+                error_message += (
+                    "**Причина: Ошибка аутентификации**\n\n"
+                    "Проверьте правильность следующих параметров в настройках:\n"
+                    "- JIRA_USERNAME (email пользователя)\n"
+                    "- JIRA_API_TOKEN (токен API)\n\n"
+                    "Убедитесь, что токен API активен и имеет необходимые разрешения."
+                )
+            elif "404" in error_details or "not found" in error_details.lower():
+                error_message += (
+                    "**Причина: Ресурс не найден**\n\n"
+                    f"Проверьте настройку JIRA_PROJECT в файле .env. Текущее значение: {jira_project}\n"
+                    "Используйте ключ существующего проекта Jira."
+                )
+            elif "connection" in error_details.lower() or "timeout" in error_details.lower():
+                error_message += (
+                    "**Причина: Проблема с подключением**\n\n"
+                    f"Проверьте настройку JIRA_URL в файле .env. Текущее значение: {jira_url}\n"
+                    "URL должен быть в формате 'https://ваш-домен.atlassian.net'\n\n"
+                    "Убедитесь, что ваш сервер имеет доступ к Jira API."
+                )
+            elif "permission" in error_details.lower() or "403" in error_details:
+                error_message += (
+                    "**Причина: Недостаточно прав**\n\n"
+                    "Пользователь Jira не имеет необходимых разрешений для создания задач в проекте.\n"
+                    "Обратитесь к администратору Jira для предоставления необходимых прав."
+                )
+            elif "list index out of range" in error_details.lower():
+                error_message += (
+                    "**Причина: Проблема с форматом данных**\n\n"
+                    "Возможно, некорректные настройки API или проблема с форматом данных проекта.\n"
+                    "Проверьте все настройки подключения к Jira и формат данных задач."
+                )
+            else:
+                error_message += f"**Техническая причина ошибки:** {error_details}\n\n"
+                error_message += "Проверьте все настройки подключения к Jira и повторите попытку."
+
+            error_message += "\n\nВ качестве альтернативы был создан CSV-файл для ручного импорта в Jira."
+
+            await callback.message.edit_text(error_message)
+
             file = FSInputFile(result['csv_export_file'])
-
-            await callback.message.edit_text(
-                f"⚠️ Экспорт в Jira через API не удался.\n\n"
-                f"Причина: {error_details}\n\n"
-                f"В качестве альтернативы был создан CSV-файл для ручного импорта в Jira."
-            )
-
             await bot.send_document(
                 callback.from_user.id,
                 file,
-                caption=f"Файл для импорта в Jira (проект '{project['name']}')\n\n{result['message']}"
-            )
-
-            await callback.message.edit_text(
-                "Экспорт в Jira через API не удался. Отправлен CSV-файл для ручного импорта."
+                caption=f"Файл для импорта в Jira (проект '{project['name']}')"
             )
 
         buttons = [
@@ -1738,19 +1926,53 @@ async def confirm_jira_export(callback: CallbackQuery):
 
         # Определяем тип ошибки для более информативного сообщения
         error_message = str(e)
-        if "Connection" in error_message or "timeout" in error_message.lower():
-            user_error = "Не удалось подключиться к серверу Jira. Проверьте доступность сервера и сетевое подключение."
-        elif "Authentication" in error_message or "credentials" in error_message.lower() or "401" in error_message:
-            user_error = "Ошибка аутентификации. Проверьте правильность логина и токена API для Jira."
-        elif "Permission" in error_message or "403" in error_message:
-            user_error = "Недостаточно прав для создания задач в Jira. Обратитесь к администратору Jira."
-        else:
-            user_error = f"Произошла ошибка при экспорте: {str(e)}"
+        user_friendly_message = "❌ При экспорте в Jira произошла ошибка:\n\n"
 
-        await callback.message.edit_text(
-            f"❌ {user_error}\n\n"
-            f"Попробуйте повторить операцию позже или обратитесь к администратору системы."
-        )
+        if "Connection" in error_message or "timeout" in error_message.lower() or "ConnectionError" in error_message:
+            user_friendly_message += (
+                "**Проблема с подключением к серверу Jira**\n\n"
+                "Возможные причины:\n"
+                "- Неправильный URL сервера Jira\n"
+                "- Проблемы с сетевым подключением\n"
+                "- Сервер Jira недоступен\n\n"
+                f"Проверьте настройку JIRA_URL (текущее значение: {os.getenv('JIRA_URL', 'Не задано')})"
+            )
+        elif "Authentication" in error_message or "credentials" in error_message.lower() or "401" in error_message or "authorization" in error_message.lower():
+            user_friendly_message += (
+                "**Ошибка аутентификации в Jira**\n\n"
+                "Возможные причины:\n"
+                "- Неправильное имя пользователя или email\n"
+                "- Неверный API-токен\n"
+                "- Токен API истек или был отозван\n\n"
+                "Проверьте настройки JIRA_USERNAME и JIRA_API_TOKEN в файле .env"
+            )
+        elif "Permission" in error_message or "403" in error_message or "access" in error_message.lower():
+            user_friendly_message += (
+                "**Недостаточно прав для создания задач в Jira**\n\n"
+                "Пользователь, указанный в настройках, не имеет необходимых разрешений.\n"
+                "Обратитесь к администратору Jira для предоставления соответствующих прав."
+            )
+        elif "project" in error_message.lower() and (
+                "not found" in error_message.lower() or "does not exist" in error_message.lower()):
+            user_friendly_message += (
+                "**Указанный проект не найден в Jira**\n\n"
+                f"Проект с ключом '{os.getenv('JIRA_PROJECT', 'Не задано')}' не существует или недоступен.\n"
+                "Проверьте настройку JIRA_PROJECT в файле .env"
+            )
+        elif "list index" in error_message.lower() or "IndexError" in error_message:
+            user_friendly_message += (
+                "**Ошибка при обработке данных Jira**\n\n"
+                "Возможные причины:\n"
+                "- Неверные учетные данные Jira\n"
+                "- Некорректный формат ответа от Jira API\n"
+                "- Проблема с настройками проекта в Jira\n\n"
+                "Проверьте все параметры подключения в файле .env"
+            )
+        else:
+            user_friendly_message += f"**Техническая информация об ошибке:** {str(e)}\n\n"
+            user_friendly_message += "Проверьте настройки подключения к Jira и повторите попытку позже."
+
+        await callback.message.edit_text(user_friendly_message)
 
         # Предлагаем альтернативное решение - экспорт в CSV
         try:

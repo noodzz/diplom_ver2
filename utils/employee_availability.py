@@ -43,6 +43,16 @@ def get_available_dates_for_task(employee_id, start_date_str, duration, employee
         # Преобразуем дату начала в объект datetime
         current_date = datetime.datetime.strptime(start_date_str, '%Y-%m-%d')
 
+        # Проверка на очень длинные задачи
+        if duration > 100:  # Если задача длится более 100 дней
+            print(f"ВНИМАНИЕ: Задача очень длинная ({duration} дней). Игнорируем выходные дни.")
+            end_date = current_date + datetime.timedelta(days=duration - 1)
+            return (
+                start_date_str,
+                end_date.strftime('%Y-%m-%d'),
+                duration
+            )
+
         # Ищем первый доступный (рабочий) день, начиная с даты начала
         first_working_day = None
         max_search_days = 30  # Ограничиваем поиск 30 днями

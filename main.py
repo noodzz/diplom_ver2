@@ -1006,6 +1006,28 @@ async def calculate_schedule(callback: CallbackQuery):
         result = schedule_project(project, tasks, task_manager, employee_manager)
         print(f"Updating database with calculated dates for {len(result['task_dates'])} tasks...")
 
+        # Дополнительный анализ по алгоритму Форда
+        print("Выполняется дополнительный анализ по алгоритму Форда...")
+        try:
+            # Используем NetworkModel для классического анализа
+            network_result = network_model.calculate(project, all_tasks)
+
+            # Добавляем результаты сетевого анализа в результат
+            result['network_analysis'] = {
+                'early_times': network_result.get('early_times', []),
+                'late_times': network_result.get('late_times', []),
+                'reserves': network_result.get('reserves', []),
+                'ford_critical_path': network_result.get('critical_path', []),
+                'ford_duration': network_result.get('duration', 0)
+            }
+
+            print(f"Алгоритм Форда: длительность = {network_result.get('duration', 0)} дней")
+            print(f"Практический расчет: длительность = {result.get('duration', 0)} дней")
+
+        except Exception as e:
+            print(f"Ошибка при сетевом анализе: {str(e)}")
+            result['network_analysis'] = None
+
         # Создаем словарь задач для валидации
         task_map = {}
         graph = {}
@@ -1177,6 +1199,94 @@ async def calculate_schedule(callback: CallbackQuery):
         await callback.message.edit_text(f"Ошибка при расчете календарного плана: {str(e)}")
         return
 
+
+def add_network_analysis_to_report(text, result, tasks, task_manager):
+    """
+    Добавляет сетевой анализ по алгоритму Форда в отчет
+
+    Args:
+        text (str): Текущий текст отчета
+        result (dict): Результаты планирования
+        tasks (list): Список задач
+        task_manager: Менеджер задач
+
+    Returns:
+        str: Обновленный текст отчета
+    """
+    network_analysis = result.get('network_analysis')
+    if not network_analysis:
+        return text
+
+    text += f"\n🔬 СЕТЕВОЙ АНАЛИЗ (алгоритм Форда)\n"
+    text += f"Классический расчет критического пути без учета назначений сотрудников:\n\n"
+
+    # Сравнение длительностей
+    ford_duration = network_analysis.get('ford_duration', 0)
+    practical_duration = result.get('duration', 0)
+
+    text += f"Теоретическая длительность (алгоритм Форда): {ford_duration} дней\n"
+    text += f"Практическая длительность (с учетом ресурсов): {practical_duration} дней\n"
+
+    if ford_duration != practical_duration:
+        text += f"Разница: {practical_duration - ford_duration} дней (влияние ресурсных ограничений)\n"
+
+    text += "\n"
+
+    # Резервы времени
+    reserves = network_analysis.get('reserves', [])
+    early_times = network_analysis.get('early_times', [])
+    late_times = network_analysis.get('late_times', [])
+
+    if reserves and early_times and late_times:
+        text += f"📊 РЕЗЕРВЫ ВРЕМЕНИ ПО ЗАДАЧАМ:\n"
+        text += f"(Резерв = Позднее время - Ранее время)\n\n"
+
+        # Создаем мапинг для задач
+        task_map = {}
+        for i, task in enumerate(tasks):
+            if i < len(reserves):
+                task_map[i] = task
+
+        # Выводим резервы для каждой задачи
+        for i, (early, late, reserve) in enumerate(zip(early_times, late_times, reserves)):
+            if i == 0:  # Пропускаем фиктивный источник
+                continue
+            if i == len(reserves) - 1:  # Пропускаем фиктивный сток
+                continue
+
+            task_index = i - 1  # Корректировка индекса для задач
+            if task_index < len(tasks):
+                task = tasks[task_index]
+                status = "🔴 КРИТИЧЕСКАЯ" if reserve == 0 else f"🟢 {reserve} дн."
+                text += f"• {task.get('name', f'Задача {task_index + 1}')}: {status}\n"
+                text += f"  Раннее начало: день {early}, Позднее начало: день {late}\n"
+
+        text += "\n"
+
+        # Критический путь по Форду
+        ford_critical = network_analysis.get('ford_critical_path', [])
+        practical_critical = result.get('critical_path', [])
+
+        if ford_critical:
+            text += f"🎯 КРИТИЧЕСКИЙ ПУТЬ (алгоритм Форда):\n"
+            for task_id in ford_critical:
+                try:
+                    if isinstance(task_id, str) and task_id.isdigit():
+                        task = task_manager.get_task(int(task_id))
+                    else:
+                        task = task_manager.get_task(task_id)
+                    if task:
+                        text += f"• {task['name']}\n"
+                except:
+                    text += f"• Задача ID: {task_id}\n"
+
+        if ford_critical != practical_critical:
+            text += f"\n⚠️ Практический критический путь отличается от теоретического\n"
+            text += f"из-за ограничений по ресурсам и выходным дням сотрудников.\n"
+
+    text += "\n"
+    return text
+
 def generate_planning_report(project, tasks, result, task_manager, employee_manager):
     """
     Генерирует отчет о результатах планирования
@@ -1276,7 +1386,8 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
 
     if critical_path:
         critical_tasks = []
-        total_critical_days = 0
+        critical_start_date = None
+        critical_end_date = None
 
         for task_id in critical_path:
             try:
@@ -1289,7 +1400,6 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
 
                 if task:
                     critical_tasks.append(task)
-                    total_critical_days += task.get('duration', 0)
 
                     # Форматируем даты для отображения
                     start_date = "?"
@@ -1310,6 +1420,19 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
                         # Используем даты из задачи, если они есть
                         start_date = format_date(task['start_date'])
                         end_date = format_date(task['end_date'])
+
+                    # Вычисляем календарную длительность критического пути
+                    if start_date != "?" and end_date != "?":
+                        try:
+                            task_start_obj = datetime.datetime.strptime(start_date, '%d.%m.%Y')
+                            task_end_obj = datetime.datetime.strptime(end_date, '%d.%m.%Y')
+
+                            if critical_start_date is None or task_start_obj < critical_start_date:
+                                critical_start_date = task_start_obj
+                            if critical_end_date is None or task_end_obj > critical_end_date:
+                                critical_end_date = task_end_obj
+                        except ValueError:
+                            pass
 
                     # Добавляем информацию о задаче
                     text += f"• {task['name']} ({task.get('duration', 0)} дн.)\n"
@@ -1332,7 +1455,14 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
             except Exception as e:
                 print(f"Ошибка при обработке задачи {task_id} критического пути: {str(e)}")
 
-        text += f"Суммарная длительность критического пути: {total_critical_days} дней\n\n"
+        # ИСПРАВЛЕНИЕ: Вычисляем календарную длительность критического пути
+        if critical_start_date and critical_end_date:
+            critical_path_duration = (critical_end_date - critical_start_date).days + 1
+            text += f"Календарная длительность критического пути: {critical_path_duration} дней\n\n"
+        else:
+            # Fallback: суммируем длительности задач (старый способ)
+            total_critical_days = sum(task.get('duration', 0) for task in critical_tasks)
+            text += f"Суммарная длительность задач критического пути: {total_critical_days} дней\n\n"
     else:
         text += "Критический путь не определен. Возможные причины:\n"
         text += "• Недостаточно связей между задачами\n"
@@ -1467,6 +1597,8 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
         text += "• Не указаны должности для задач\n"
         text += "• Нет доступных сотрудников с требуемыми должностями\n"
         text += "• Слишком много выходных дней у сотрудников\n\n"
+
+    text = add_network_analysis_to_report(text, result, tasks, task_manager)
 
     # Рекомендации
     text += f"📝 РЕКОМЕНДАЦИИ\n"

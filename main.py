@@ -1421,19 +1421,6 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
                         start_date = format_date(task['start_date'])
                         end_date = format_date(task['end_date'])
 
-                    # Вычисляем календарную длительность критического пути
-                    if start_date != "?" and end_date != "?":
-                        try:
-                            task_start_obj = datetime.datetime.strptime(start_date, '%d.%m.%Y')
-                            task_end_obj = datetime.datetime.strptime(end_date, '%d.%m.%Y')
-
-                            if critical_start_date is None or task_start_obj < critical_start_date:
-                                critical_start_date = task_start_obj
-                            if critical_end_date is None or task_end_obj > critical_end_date:
-                                critical_end_date = task_end_obj
-                        except ValueError:
-                            pass
-
                     # Добавляем информацию о задаче
                     text += f"• {task['name']} ({task.get('duration', 0)} дн.)\n"
                     text += f"  Даты: {start_date} - {end_date}\n"
@@ -1455,14 +1442,6 @@ def generate_planning_report(project, tasks, result, task_manager, employee_mana
             except Exception as e:
                 print(f"Ошибка при обработке задачи {task_id} критического пути: {str(e)}")
 
-        # ИСПРАВЛЕНИЕ: Вычисляем календарную длительность критического пути
-        if critical_start_date and critical_end_date:
-            critical_path_duration = (critical_end_date - critical_start_date).days + 1
-            text += f"Календарная длительность критического пути: {critical_path_duration} дней\n\n"
-        else:
-            # Fallback: суммируем длительности задач (старый способ)
-            total_critical_days = sum(task.get('duration', 0) for task in critical_tasks)
-            text += f"Суммарная длительность задач критического пути: {total_critical_days} дней\n\n"
     else:
         text += "Критический путь не определен. Возможные причины:\n"
         text += "• Недостаточно связей между задачами\n"

@@ -12,6 +12,7 @@ class NetworkModel:
     def calculate(self, project, tasks):
         """
         Рассчитывает календарный план проекта, используя метод критического пути (CPM)
+        ИСКЛЮЧАЕТ подзадачи из анализа
 
         Args:
             project (dict): Информация о проекте
@@ -31,26 +32,39 @@ class NetworkModel:
             }
 
         try:
-            self.tasks = list(tasks)
-            self.task_dict = {task['id']: task for task in tasks if 'id' in task}
+            # ИСПРАВЛЕНИЕ: Фильтруем подзадачи перед анализом
+            main_tasks = []
+            for task in tasks:
+                # Исключаем подзадачи (у них есть parent_id)
+                if not task.get('parent_id'):
+                    main_tasks.append(task)
 
-            # Строим граф зависимостей
+            print(f"[CPM Debug] Всего задач: {len(tasks)}, основных задач для CPM: {len(main_tasks)}")
+
+            if not main_tasks:
+                return self._fallback_calculation(project, tasks)
+
+            # Используем только основные задачи для анализа
+            self.tasks = list(main_tasks)
+            self.task_dict = {task['id']: task for task in main_tasks if 'id' in task}
+
+            # Строим граф зависимостей только для основных задач
             self._build_dependency_graph()
 
             # Проверяем на циклы
             if self._has_cycles():
                 print("⚠️ Обнаружены циклические зависимости в проекте")
-                return self._fallback_calculation(project, tasks)
+                return self._fallback_calculation(project, main_tasks)
 
             # Выполняем расчет методом критического пути
             early_start, early_finish = self._forward_pass()
             late_start, late_finish = self._backward_pass(early_finish)
             reserves = self._calculate_reserves(early_start, late_start)
 
-            # Диагностика критических задач
+            # Диагностика критических задач (только основные)
             critical_tasks_debug = [tid for tid, reserve in reserves.items() if abs(reserve) < 0.001]
-            print(f"[CPM Debug] === ДИАГНОСТИКА КРИТИЧЕСКОГО ПУТИ ===")
-            print(f"[CPM Debug] Найдено {len(critical_tasks_debug)} критических задач:")
+            print(f"[CPM Debug] === ДИАГНОСТИКА КРИТИЧЕСКОГО ПУТИ (ТОЛЬКО ОСНОВНЫЕ ЗАДАЧИ) ===")
+            print(f"[CPM Debug] Найдено {len(critical_tasks_debug)} критических основных задач:")
 
             critical_with_times = []
             for tid in critical_tasks_debug:
@@ -70,11 +84,9 @@ class NetworkModel:
                 print(f"[CPM Debug]   {i + 1}. '{task_name}' (ID: {tid})")
                 print(f"[CPM Debug]      День {start_time} - {finish_time} ({duration} дн.)")
 
-                # Если это последовательные критические задачи, считаем общую длительность
                 if i == 0:
                     total_critical_duration = finish_time
                 else:
-                    # Проверяем, идет ли эта задача сразу после предыдущей
                     prev_finish = critical_with_times[i - 1][2]
                     if abs(start_time - prev_finish) < 0.001:
                         total_critical_duration = finish_time
@@ -85,7 +97,7 @@ class NetworkModel:
 
             critical_path = self._find_critical_path(reserves)
 
-            print(f"[CPM Debug] Найден критический путь из {len(critical_path)} задач:")
+            print(f"[CPM Debug] Найден критический путь из {len(critical_path)} основных задач:")
             path_duration = 0
             for i, tid in enumerate(critical_path):
                 task = self.task_dict.get(tid, {})
@@ -98,76 +110,21 @@ class NetworkModel:
                 if i == 0:
                     path_duration = start_time + duration
                 else:
-                    # Для последующих задач берем максимум
                     path_duration = max(path_duration, start_time + duration)
 
             print(f"[CPM Debug] Длительность по найденному пути: {path_duration} дней")
             print(f"[CPM Debug] === КОНЕЦ ДИАГНОСТИКИ КРИТИЧЕСКОГО ПУТИ ===")
 
-
-            # Рассчитываем длительность проекта
-            project_duration = max(early_finish.values()) if early_finish else 0
-
-            # Сравниваем с проектной длительностью
-            if abs(path_duration - project_duration) > 0.001:
-                print(f"[CPM Debug] ⚠️ РАСХОЖДЕНИЕ: Путь дает {path_duration}, проект {project_duration}")
-
-            # Рассчитываем длительность проекта (исправляем 0-based на 1-based)
+            # ИСПРАВЛЕНИЕ: Убираем некорректное добавление +1
             raw_duration = max(early_finish.values()) if early_finish else 0
+            project_duration = int(raw_duration) if raw_duration > 0 else 0
 
-            # В CPM анализе мы используем 0-based систему (день 0, 1, 2...),
-            # но для пользователя нужна 1-based система (день 1, 2, 3...)
-            # Поэтому добавляем 1 для корректного отображения календарных дней
-            project_duration = raw_duration + 1 if raw_duration > 0 else 0
-
-            print(f"[CPM Debug] === ИСПРАВЛЕНИЕ СИСТЕМЫ ОТСЧЕТА ===")
-            print(f"[CPM Debug] Время окончания в 0-based системе: {raw_duration}")
-            print(f"[CPM Debug] Календарных дней проекта (1-based): {project_duration}")
+            print(f"[CPM Debug] === ИСПРАВЛЕННЫЙ РАСЧЕТ ДЛИТЕЛЬНОСТИ ===")
+            print(f"[CPM Debug] Время окончания проекта: {raw_duration}")
+            print(f"[CPM Debug] Длительность проекта (CPM): {project_duration} дней")
             print(f"[CPM Debug] === КОНЕЦ ИСПРАВЛЕНИЯ ===")
 
-            # Детальная диагностика для отладки расхождений
-            if early_finish:
-                print(f"[CPM Debug] === ДИАГНОСТИКА ДЛИТЕЛЬНОСТИ ПРОЕКТА ===")
-                print(f"[CPM Debug] Максимальное время окончания (early_finish): {raw_duration}")
-
-                # Показываем все времена окончания
-                sorted_finish_times = sorted(early_finish.items(), key=lambda x: x[1], reverse=True)
-                print(f"[CPM Debug] Топ-5 времен окончания:")
-                for i, (tid, finish_time) in enumerate(sorted_finish_times[:5]):
-                    task = self.task_dict.get(tid, {})
-                    task_name = task.get('name', 'Неизвестно')
-                    duration = task.get('duration', 1)
-                    start_time = early_start.get(tid, 0)
-                    print(f"[CPM Debug]   {i + 1}. '{task_name}' (ID: {tid})")
-                    print(
-                        f"[CPM Debug]      Начало: день {start_time}, Длительность: {duration} дн., Окончание: день {finish_time}")
-
-                # Находим задачу с максимальным временем окончания
-                max_task_id = max(early_finish.keys(), key=lambda tid: early_finish[tid])
-                max_task = self.task_dict.get(max_task_id, {})
-                max_task_duration = max_task.get('duration', 1)
-                max_task_start = early_start.get(max_task_id, 0)
-
-                print(f"[CPM Debug] Последняя задача проекта:")
-                print(f"[CPM Debug]   Название: '{max_task.get('name', 'Неизвестно')}'")
-                print(f"[CPM Debug]   ID: {max_task_id}")
-                print(f"[CPM Debug]   Начало: день {max_task_start} (0-based) = день {max_task_start + 1} (1-based)")
-                print(f"[CPM Debug]   Длительность: {max_task_duration} дней")
-                print(f"[CPM Debug]   Окончание: день {raw_duration} (0-based) = конец дня {raw_duration} (1-based)")
-                print(
-                    f"[CPM Debug]   Расчет: {max_task_start} + {max_task_duration} = {max_task_start + max_task_duration}")
-                print(f"[CPM Debug]   Общая длительность проекта: {project_duration} календарных дней")
-
-                # Проверяем правильность расчета
-                expected_finish = max_task_start + max_task_duration
-                if abs(expected_finish - raw_duration) > 0.001:
-                    print(f"[CPM Debug] ⚠️ ОШИБКА: Ожидалось {expected_finish}, получили {raw_duration}")
-                else:
-                    print(f"[CPM Debug] ✓ Расчет времени окончания корректен")
-
-                print(f"[CPM Debug] === КОНЕЦ ДИАГНОСТИКИ ===")
-
-            # Генерируем даты задач
+            # Генерируем даты задач только для основных задач
             task_dates = self._calculate_task_dates(project['start_date'], early_start, early_finish)
 
             return {
@@ -181,10 +138,12 @@ class NetworkModel:
 
         except Exception as e:
             print(f"Ошибка в сетевом анализе: {str(e)}")
-            return self._fallback_calculation(project, tasks)
+            return self._fallback_calculation(project, main_tasks if 'main_tasks' in locals() else tasks)
 
     def _build_dependency_graph(self):
-        """Строит граф зависимостей между задачами"""
+        """Строит граф зависимостей между основными задачами"""
+        from collections import defaultdict
+
         self.predecessors = defaultdict(list)  # task_id -> [predecessor_ids]
         self.successors = defaultdict(list)  # task_id -> [successor_ids]
 
@@ -193,12 +152,13 @@ class NetworkModel:
             deps = self._get_task_dependencies(task_id)
 
             for pred_id in deps:
+                # Проверяем, что предшественник тоже является основной задачей
                 if pred_id in self.task_dict:
                     self.predecessors[task_id].append(pred_id)
                     self.successors[pred_id].append(task_id)
 
     def _get_task_dependencies(self, task_id):
-        """Получает список предшественников задачи"""
+        """Получает список предшественников задачи, фильтруя подзадачи"""
         task = self.task_dict.get(task_id)
         if not task:
             return []
@@ -210,16 +170,21 @@ class NetworkModel:
             dependencies = [pred for pred in predecessors if isinstance(pred, (int, str))]
         elif isinstance(predecessors, str) and predecessors.strip():
             try:
-                # Попытка парсинга JSON
+                import json
                 dependencies = json.loads(predecessors)
             except:
-                # Разделение по запятым
                 dependencies = [
                     int(pred.strip()) for pred in predecessors.split(',')
                     if pred.strip().isdigit()
                 ]
 
-        return dependencies
+        # Фильтруем зависимости, оставляя только основные задачи
+        filtered_dependencies = []
+        for dep_id in dependencies:
+            if dep_id in self.task_dict:  # Проверяем, что это основная задача
+                filtered_dependencies.append(dep_id)
+
+        return filtered_dependencies
 
     def _has_cycles(self):
         """Проверяет граф на наличие циклов"""

@@ -121,6 +121,7 @@ class ProjectManager:
                             parent_id=task_id,
                             name=subtask["name"],
                             duration=subtask["duration"],
+                            working_duration=subtask.get("working_duration", subtask["duration"]),
                             position=subtask["position"],
                             parallel=subtask.get("parallel", False)
                         )

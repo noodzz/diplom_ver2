@@ -55,11 +55,11 @@ def schedule_project(project, tasks, task_manager, employee_manager):
     task_dates = balance_workload_final(task_dates, task_map, employee_manager, employee_workload)
 
     # Шаг 7: Определяем критический путь
-    critical_path = identify_critical_path(task_dates, graph, task_map)
+    critical_path = identify_critical_path_without_subtasks(task_dates, graph, task_map)
     print(f"Критический путь содержит {len(critical_path)} задач")
 
     # Шаг 8: Рассчитываем длительность проекта
-    project_duration = calculate_project_duration(project['start_date'], task_dates)
+    project_duration = calculate_project_duration_unified(project['start_date'], task_dates)
     print(f"Длительность проекта: {project_duration} дней")
 
     # Выводим статистику нагрузки
@@ -71,6 +71,68 @@ def schedule_project(project, tasks, task_manager, employee_manager):
         'duration': project_duration
     }
 
+
+def calculate_project_duration_unified(project_start_date, task_dates):
+    """
+    Унифицированная функция расчета длительности проекта
+
+    Args:
+        project_start_date (str): Дата начала проекта в формате YYYY-MM-DD
+        task_dates (dict): Словарь с датами задач
+
+    Returns:
+        int: Длительность проекта в днях (включительно)
+    """
+    if not task_dates:
+        return 0
+
+    try:
+        # Парсим дату начала проекта
+        project_start = datetime.datetime.strptime(project_start_date, '%Y-%m-%d')
+
+        # Находим самую позднюю дату окончания среди всех задач
+        latest_end_date = None
+        earliest_start_date = None
+
+        for task_id, dates in task_dates.items():
+            # Проверяем дату начала
+            if 'start' in dates and dates['start']:
+                try:
+                    start_date = datetime.datetime.strptime(dates['start'], '%Y-%m-%d')
+                    if earliest_start_date is None or start_date < earliest_start_date:
+                        earliest_start_date = start_date
+                except (ValueError, TypeError):
+                    continue
+
+            # Проверяем дату окончания
+            if 'end' in dates and dates['end']:
+                try:
+                    end_date = datetime.datetime.strptime(dates['end'], '%Y-%m-%d')
+                    if latest_end_date is None or end_date > latest_end_date:
+                        latest_end_date = end_date
+                except (ValueError, TypeError):
+                    continue
+
+        if latest_end_date is None:
+            return 0
+
+        # Используем фактическую дату начала или дату начала проекта
+        actual_start = earliest_start_date if earliest_start_date else project_start
+
+        # Рассчитываем длительность включительно
+        # От первого дня до последнего дня включительно
+        duration = (latest_end_date - actual_start).days + 1
+
+        print(f"[Duration Debug] Расчет длительности проекта:")
+        print(f"[Duration Debug]   Дата начала: {actual_start.strftime('%Y-%m-%d')}")
+        print(f"[Duration Debug]   Дата окончания: {latest_end_date.strftime('%Y-%m-%d')}")
+        print(f"[Duration Debug]   Длительность: {duration} дней")
+
+        return duration
+
+    except Exception as e:
+        print(f"Ошибка при расчете длительности проекта: {str(e)}")
+        return 0
 
 def balance_workload_final(task_dates, task_map, employee_manager, employee_workload):
     """
@@ -2700,6 +2762,107 @@ def calculate_project_duration(project_start_date, task_dates):
         print(f"Ошибка при расчете длительности проекта: {str(e)}")
         return 0
 
+
+def identify_critical_path_without_subtasks(task_dates, graph, task_map):
+    """
+    Определяет критический путь проекта, исключая подзадачи
+
+    Args:
+        task_dates (dict): Словарь с датами задач
+        graph (dict): Граф зависимостей
+        task_map (dict): Словарь задач по ID
+
+    Returns:
+        list: Список ID основных задач, образующих критический путь
+    """
+    if not task_dates:
+        return []
+
+    # Фильтруем только основные задачи (исключаем подзадачи)
+    main_task_dates = {}
+    for task_id, dates in task_dates.items():
+        try:
+            # Проверяем, является ли задача подзадачей
+            numeric_id = int(task_id) if isinstance(task_id, str) and task_id.isdigit() else task_id
+
+            if numeric_id in task_map:
+                task = task_map[numeric_id]
+                # Исключаем подзадачи
+                if not task.get('parent_id'):
+                    main_task_dates[task_id] = dates
+            elif str(task_id) in task_map:
+                task = task_map[str(task_id)]
+                if not task.get('parent_id'):
+                    main_task_dates[task_id] = dates
+        except:
+            # Если не можем определить, оставляем задачу
+            main_task_dates[task_id] = dates
+
+    print(f"[Debug] Критический путь: исходных задач {len(task_dates)}, основных задач {len(main_task_dates)}")
+
+    # Ищем самую позднюю дату окончания среди основных задач
+    latest_end_date = None
+    latest_task_id = None
+
+    for task_id, dates in main_task_dates.items():
+        if 'end' in dates:
+            try:
+                import datetime
+                end_date = datetime.datetime.strptime(dates['end'], '%Y-%m-%d')
+                if latest_end_date is None or end_date > latest_end_date:
+                    latest_end_date = end_date
+                    latest_task_id = task_id
+            except (ValueError, TypeError):
+                continue
+
+    # Если не нашли последнюю задачу, возвращаем пустой список
+    if latest_task_id is None:
+        return []
+
+    # Строим критический путь только через основные задачи
+    critical_path = []
+    current_task_id = latest_task_id
+
+    while current_task_id is not None:
+        critical_path.append(current_task_id)
+
+        # Находим предшественников текущей задачи среди основных задач
+        predecessors = graph.get(current_task_id, [])
+
+        # Фильтруем предшественников, оставляя только основные задачи
+        main_predecessors = []
+        for pred_id in predecessors:
+            if pred_id in main_task_dates:
+                main_predecessors.append(pred_id)
+
+        if not main_predecessors:
+            # Это начальная задача, путь построен
+            break
+
+        # Ищем предшественника с самой поздней датой окончания среди основных задач
+        latest_predecessor_id = None
+        latest_predecessor_end = None
+
+        for pred_id in main_predecessors:
+            if pred_id in main_task_dates and 'end' in main_task_dates[pred_id]:
+                try:
+                    import datetime
+                    end_date = datetime.datetime.strptime(main_task_dates[pred_id]['end'], '%Y-%m-%d')
+                    if latest_predecessor_end is None or end_date > latest_predecessor_end:
+                        latest_predecessor_end = end_date
+                        latest_predecessor_id = pred_id
+                except (ValueError, TypeError):
+                    continue
+
+        # Переходим к предшественнику или завершаем, если предшественников нет
+        current_task_id = latest_predecessor_id
+
+    # Возвращаем критический путь в обратном порядке (от начала к концу)
+    filtered_path = list(reversed(critical_path))
+
+    print(f"[Debug] Критический путь (основные задачи): {len(filtered_path)} задач")
+
+    return filtered_path
 
 def identify_critical_path(task_dates, graph, task_map):
     """

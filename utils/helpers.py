@@ -136,6 +136,32 @@ def parse_csv(csv_content):
             except Exception as e:
                 errors.append(f"Строка {row_number}: ошибка обработки: {str(e)}")
 
+        for task_name, group_task in group_tasks.items():
+            if group_task["subtasks"]:
+                # Пересчитываем длительность на основе подзадач
+                total_duration = 0
+                max_duration = 0
+                has_parallel = False
+
+                for subtask in group_task["subtasks"]:
+                    if subtask.get("parallel", False):
+                        has_parallel = True
+                        max_duration = max(max_duration, subtask["duration"])
+                    else:
+                        total_duration += subtask["duration"]
+
+                # Определяем итоговую длительность
+                if has_parallel and total_duration > 0:
+                    # Смешанный случай: есть и параллельные, и последовательные
+                    # Берем сумму последовательных + максимум параллельных
+                    group_task["duration"] = total_duration + max_duration
+                elif has_parallel:
+                    # Только параллельные подзадачи
+                    group_task["duration"] = max_duration
+                else:
+                    # Только последовательные подзадачи
+                    group_task["duration"] = total_duration
+
         # Добавляем новую проверку: групповые задачи должны иметь подзадачи
         for task_name, group_task in group_tasks.items():
             if not group_task["subtasks"]:

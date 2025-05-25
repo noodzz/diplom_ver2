@@ -1007,26 +1007,70 @@ async def calculate_schedule(callback: CallbackQuery):
         print(f"Updating database with calculated dates for {len(result['task_dates'])} tasks...")
 
         # Дополнительный анализ по алгоритму Форда
-        print("Выполняется дополнительный анализ по алгоритму Форда...")
+        print("Выполняется дополнительный анализ методом критического пути...")
         try:
-            # Используем NetworkModel для классического анализа
+            # Используем NetworkModel для классического анализа CPM
             network_result = network_model.calculate(project, all_tasks)
 
-            # Добавляем результаты сетевого анализа в результат
-            result['network_analysis'] = {
-                'early_times': network_result.get('early_times', []),
-                'late_times': network_result.get('late_times', []),
-                'reserves': network_result.get('reserves', []),
-                'ford_critical_path': network_result.get('critical_path', []),
-                'ford_duration': network_result.get('duration', 0)
-            }
+            # Проверяем корректность результата
+            if network_result and isinstance(network_result, dict):
+                ford_duration = network_result.get('duration', 0)
+                practical_duration = result.get('duration', 0)
 
-            print(f"Алгоритм Форда: длительность = {network_result.get('duration', 0)} дней")
-            print(f"Практический расчет: длительность = {result.get('duration', 0)} дней")
+                # Проверяем на разумность результатов
+                if ford_duration < 0:
+                    print("⚠️ Предупреждение: CPM анализ вернул отрицательную длительность")
+                    ford_duration = 0
+                elif ford_duration > practical_duration * 5:  # Теоретическая длительность не должна быть в 5+ раз больше практической
+                    print(
+                        f"⚠️ Предупреждение: CPM анализ вернул подозрительно большую длительность ({ford_duration} дней)")
+                    print("Возможные причины: ошибки в зависимостях или циклические связи")
+
+                # Добавляем результаты сетевого анализа в результат
+                result['network_analysis'] = {
+                    'early_times': network_result.get('early_times', {}),
+                    'late_times': network_result.get('late_times', {}),
+                    'reserves': network_result.get('reserves', {}),
+                    'ford_critical_path': network_result.get('critical_path', []),
+                    'ford_duration': ford_duration
+                }
+
+                print(f"CPM анализ: теоретическая длительность = {ford_duration} дней")
+                print(f"Практический расчет: длительность = {practical_duration} дней")
+
+                # Анализ разницы
+                if ford_duration > 0:
+                    if practical_duration > ford_duration:
+                        difference = practical_duration - ford_duration
+                        print(
+                            f"Влияние ресурсных ограничений: +{difference} дней ({difference / ford_duration * 100:.1f}%)")
+                    elif practical_duration < ford_duration:
+                        difference = ford_duration - practical_duration
+                        print(f"Оптимизация за счет ресурсов: -{difference} дней")
+                    else:
+                        print("Практическая и теоретическая длительности совпадают")
+
+                # Проверка критического пути
+                cpm_critical = network_result.get('critical_path', [])
+                if cpm_critical:
+                    print(f"CPM критический путь: {len(cpm_critical)} задач")
+                else:
+                    print("⚠️ CPM критический путь не определен")
+
+            else:
+                print("⚠️ Сетевой анализ вернул некорректный результат")
+                result['network_analysis'] = None
 
         except Exception as e:
             print(f"Ошибка при сетевом анализе: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
             result['network_analysis'] = None
+
+            # В случае ошибки добавляем базовую информацию
+            practical_duration = result.get('duration', 0)
+            if practical_duration > 0:
+                print(f"Используется только практический расчет: {practical_duration} дней")
 
         # Создаем словарь задач для валидации
         task_map = {}
@@ -1202,7 +1246,7 @@ async def calculate_schedule(callback: CallbackQuery):
 
 def add_network_analysis_to_report(text, result, tasks, task_manager):
     """
-    Добавляет сетевой анализ по алгоритму Форда в отчет
+    Добавляет сетевой анализ по алгоритму CPM в отчет
 
     Args:
         text (str): Текущий текст отчета
@@ -1217,72 +1261,136 @@ def add_network_analysis_to_report(text, result, tasks, task_manager):
     if not network_analysis:
         return text
 
-    text += f"\n🔬 СЕТЕВОЙ АНАЛИЗ (алгоритм Форда)\n"
+    text += f"\n🔬 СЕТЕВОЙ АНАЛИЗ (метод критического пути)\n"
     text += f"Классический расчет критического пути без учета назначений сотрудников:\n\n"
 
     # Сравнение длительностей
     ford_duration = network_analysis.get('ford_duration', 0)
     practical_duration = result.get('duration', 0)
 
-    text += f"Теоретическая длительность (алгоритм Форда): {ford_duration} дней\n"
+    text += f"Теоретическая длительность (CPM): {ford_duration} дней\n"
     text += f"Практическая длительность (с учетом ресурсов): {practical_duration} дней\n"
 
     if ford_duration != practical_duration:
-        text += f"Разница: {practical_duration - ford_duration} дней (влияние ресурсных ограничений)\n"
+        difference = practical_duration - ford_duration
+        if difference > 0:
+            text += f"Увеличение сроков: {difference} дней (влияние ресурсных ограничений)\n"
+        else:
+            text += f"Сокращение сроков: {abs(difference)} дней (оптимизация ресурсов)\n"
 
     text += "\n"
 
     # Резервы времени
-    reserves = network_analysis.get('reserves', [])
-    early_times = network_analysis.get('early_times', [])
-    late_times = network_analysis.get('late_times', [])
+    reserves = network_analysis.get('reserves', {})
+    early_times = network_analysis.get('early_times', {})
+    late_times = network_analysis.get('late_times', {})
 
     if reserves and early_times and late_times:
         text += f"📊 РЕЗЕРВЫ ВРЕМЕНИ ПО ЗАДАЧАМ:\n"
-        text += f"(Резерв = Позднее время - Ранее время)\n\n"
+        text += f"(Резерв = Позднее время начала - Раннее время начала)\n\n"
 
-        # Создаем мапинг для задач
-        task_map = {}
-        for i, task in enumerate(tasks):
-            if i < len(reserves):
-                task_map[i] = task
+        # Создаем мапинг задач по ID
+        task_map = {task['id']: task for task in tasks if 'id' in task}
 
-        # Выводим резервы для каждой задачи
-        for i, (early, late, reserve) in enumerate(zip(early_times, late_times, reserves)):
-            if i == 0:  # Пропускаем фиктивный источник
-                continue
-            if i == len(reserves) - 1:  # Пропускаем фиктивный сток
+        # Сортируем задачи по раннему времени начала
+        sorted_task_ids = sorted(early_times.keys(), key=lambda tid: early_times.get(tid, 0))
+
+        for task_id in sorted_task_ids:
+            if task_id not in task_map:
                 continue
 
-            task_index = i - 1  # Корректировка индекса для задач
-            if task_index < len(tasks):
-                task = tasks[task_index]
-                status = "🔴 КРИТИЧЕСКАЯ" if reserve == 0 else f"🟢 {reserve} дн."
-                text += f"• {task.get('name', f'Задача {task_index + 1}')}: {status}\n"
-                text += f"  Раннее начало: день {early}, Позднее начало: день {late}\n"
+            task = task_map[task_id]
+            reserve = reserves.get(task_id, 0)
+            early_start = early_times.get(task_id, 0)
+            late_start = late_times.get(task_id, 0)
+
+            # Определяем статус задачи
+            if abs(reserve) < 0.001:
+                status = "🔴 КРИТИЧЕСКАЯ"
+            elif reserve < 5:
+                status = f"🟡 {reserve:.1f} дн."
+            else:
+                status = f"🟢 {reserve:.1f} дн."
+
+            text += f"• {task.get('name', f'Задача {task_id}')}: {status}\n"
+            text += f"  Раннее начало: день {early_start:.1f}, Позднее начало: день {late_start:.1f}\n"
 
         text += "\n"
 
-        # Критический путь по Форду
+        # Критический путь по CPM
         ford_critical = network_analysis.get('ford_critical_path', [])
         practical_critical = result.get('critical_path', [])
 
         if ford_critical:
-            text += f"🎯 КРИТИЧЕСКИЙ ПУТЬ (алгоритм Форда):\n"
+            text += f"🎯 КРИТИЧЕСКИЙ ПУТЬ (метод CPM):\n"
             for task_id in ford_critical:
                 try:
-                    if isinstance(task_id, str) and task_id.isdigit():
-                        task = task_manager.get_task(int(task_id))
+                    if task_id in task_map:
+                        task = task_map[task_id]
+                        duration = task.get('duration', 1)
+                        text += f"• {task['name']} ({duration} дн.)\n"
                     else:
+                        # Пытаемся получить из базы данных
                         task = task_manager.get_task(task_id)
-                    if task:
-                        text += f"• {task['name']}\n"
-                except:
-                    text += f"• Задача ID: {task_id}\n"
+                        if task:
+                            duration = task.get('duration', 1)
+                            text += f"• {task['name']} ({duration} дн.)\n"
+                        else:
+                            text += f"• Задача ID: {task_id}\n"
+                except Exception as e:
+                    text += f"• Задача ID: {task_id} (ошибка получения данных)\n"
+            text += "\n"
 
-        if ford_critical != practical_critical:
-            text += f"\n⚠️ Практический критический путь отличается от теоретического\n"
-            text += f"из-за ограничений по ресурсам и выходным дням сотрудников.\n"
+        # Сравнение критических путей
+        if practical_critical and ford_critical:
+            ford_set = set(str(tid) for tid in ford_critical)
+            practical_set = set(str(tid) for tid in practical_critical)
+
+            if ford_set != practical_set:
+                text += f"⚠️ Практический критический путь отличается от теоретического\n"
+                text += f"из-за ограничений по ресурсам и выходным дням сотрудников.\n\n"
+
+                # Показываем различия
+                only_theoretical = ford_set - practical_set
+                only_practical = practical_set - ford_set
+
+                if only_theoretical:
+                    text += f"Только в теоретическом пути: "
+                    theoretical_names = []
+                    for tid in only_theoretical:
+                        try:
+                            task_id = int(tid) if tid.isdigit() else tid
+                            if task_id in task_map:
+                                theoretical_names.append(task_map[task_id]['name'])
+                            else:
+                                theoretical_names.append(f"ID {tid}")
+                        except:
+                            theoretical_names.append(f"ID {tid}")
+                    text += ", ".join(theoretical_names) + "\n"
+
+                if only_practical:
+                    text += f"Только в практическом пути: "
+                    practical_names = []
+                    for tid in only_practical:
+                        try:
+                            task_id = int(tid) if tid.isdigit() else tid
+                            if task_id in task_map:
+                                practical_names.append(task_map[task_id]['name'])
+                            else:
+                                practical_names.append(f"ID {tid}")
+                        except:
+                            practical_names.append(f"ID {tid}")
+                    text += ", ".join(practical_names) + "\n"
+            else:
+                text += f"✅ Практический критический путь совпадает с теоретическим.\n"
+        elif not practical_critical:
+            text += f"⚠️ Практический критический путь не определен.\n"
+        elif not ford_critical:
+            text += f"⚠️ Теоретический критический путь не определен.\n"
+    else:
+        text += f"⚠️ Детальный анализ резервов времени недоступен.\n"
+        if ford_duration > 0:
+            text += f"Теоретическая длительность: {ford_duration} дней\n"
 
     text += "\n"
     return text

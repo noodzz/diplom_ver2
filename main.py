@@ -1,3 +1,4 @@
+import csv
 import logging
 import asyncio
 import json
@@ -25,8 +26,8 @@ from services.network_model import NetworkModel
 from services.gantt_chart import GanttChart
 from services.workload_chart import WorkloadChart
 from utils.helpers import parse_csv, format_date, is_authorized, is_admin
-from utils.scheduler import schedule_project, balance_employee_workload, update_database_assignments, \
-    debug_check_parent_subtask_dates
+from utils.scheduler import schedule_project, update_database_assignments, simple_final_validation, \
+    validate_project_schedule, validate_parallel_assignments
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -1004,20 +1005,64 @@ async def calculate_schedule(callback: CallbackQuery):
         # Выполняем расчет календарного плана с учетом выходных дней
         result = schedule_project(project, tasks, task_manager, employee_manager)
         print(f"Updating database with calculated dates for {len(result['task_dates'])} tasks...")
-        update_count = update_database_assignments(result['task_dates'], task_manager, employee_manager)
-        print(f"Successfully updated {update_count} tasks in database")
 
-        # Создаем словарь задач для передачи в функцию балансировки
+        # Создаем словарь задач для валидации
         task_map = {}
+        graph = {}
+
+        # Дополнительно получаем все задачи проекта, включая подзадачи
+        all_tasks = task_manager.get_all_tasks_by_project(project_id)
+        print(f"Получено {len(tasks)} основных задач и {len(all_tasks)} задач всего (включая подзадачи)")
+
         for task in all_tasks:  # Используем все задачи, включая подзадачи
             task_id = task['id']
             task_map[task_id] = task
-            # Также добавляем строковое представление ID
-            task_map[str(task_id)] = task
+            task_map[str(task_id)] = task  # Добавляем строковое представление ID
 
-        print(f"Создан словарь task_map с {len(task_map)} задачами")
-        debug_check_parent_subtask_dates(result['task_dates'], task_map, task_manager)
+        # Строим граф зависимостей для валидации
+        try:
+            from utils.scheduler import build_dependency_graph
+            graph, _ = build_dependency_graph(all_tasks, task_manager)
+            print(f"Построен граф зависимостей для валидации с {len(graph)} узлами")
+        except Exception as e:
+            print(f"Не удалось построить граф для валидации: {str(e)}")
+            graph = {}
+
+        # Выполняем валидацию календарного плана
+        print("Проверка корректности календарного плана...")
+        is_valid, validation_issues = validate_project_schedule(result['task_dates'], task_map, graph)
+        parallel_issues = validate_parallel_assignments(result['task_dates'], task_map)
+
+        # Если есть критические ошибки, сообщаем пользователю
+        if not is_valid:
+            critical_issues = [issue for issue in validation_issues if
+                               "Нарушение зависимости" in issue or "отсутствуют даты" in issue]
+            if critical_issues:
+                error_message = "❌ Обнаружены критические ошибки в календарном плане:\n"
+                for issue in critical_issues[:3]:  # Показываем только первые 3
+                    error_message += f"• {issue}\n"
+                if len(critical_issues) > 3:
+                    error_message += f"...и еще {len(critical_issues) - 3} ошибок\n"
+                error_message += "\nПланирование может быть некорректным. Рекомендуется проверить зависимости между задачами."
+
+                await callback.message.reply(error_message)
+
+        print(f"Обновление базы данных с рассчитанными датами для {len(result['task_dates'])} задач...")
         update_count = update_database_assignments(result['task_dates'], task_manager, employee_manager)
+        print(f"Successfully updated {update_count} tasks in database")
+
+        # Если есть предупреждения (не критические), показываем некоторые из них
+        if validation_issues and is_valid:
+            warnings = [issue for issue in validation_issues if
+                        "предупреждение" in issue.lower() or "длительность" in issue]
+            if warnings:
+                warning_text = "⚠️ Обнаружены предупреждения:\n"
+                for warning in warnings[:2]:  # Показываем только первые 2
+                    warning_text += f"• {warning}\n"
+                if len(warnings) > 2:
+                    warning_text += f"...и еще {len(warnings) - 2} предупреждений\n"
+
+                await callback.message.reply(warning_text)
 
         # Формируем результаты для отображения
         task_dates = result['task_dates']
@@ -1730,30 +1775,30 @@ async def confirm_jira_export(callback: CallbackQuery):
             await callback.message.reply("Экспорт отменен", reply_markup=markup)
             return
 
-            # Проверяем, рассчитан ли календарный план
-            tasks_with_dates = 0
-            for task in tasks:
-                if task.get('start_date') and task.get('end_date'):
-                    tasks_with_dates += 1
+        # Проверяем, рассчитан ли календарный план
+        tasks_with_dates = 0
+        for task in tasks:
+            if task.get('start_date') and task.get('end_date'):
+                tasks_with_dates += 1
 
-            if tasks_with_dates == 0:
-                await callback.message.edit_text(
-                    "⚠️ Календарный план не рассчитан. Даты выполнения задач отсутствуют.\n"
-                    "Рекомендуется сначала рассчитать календарный план проекта."
-                )
+        if tasks_with_dates == 0:
+            await callback.message.edit_text(
+                "⚠️ Календарный план не рассчитан. Даты выполнения задач отсутствуют.\n"
+                "Рекомендуется сначала рассчитать календарный план проекта."
+            )
 
-                buttons = [
-                    [InlineKeyboardButton(text="Рассчитать календарный план", callback_data=f"calculate_{project_id}")],
-                    [InlineKeyboardButton(text="Отменить экспорт", callback_data=f"view_project_{project_id}")]
-                ]
-                markup = InlineKeyboardMarkup(inline_keyboard=buttons)
-                await callback.message.reply("Что вы хотите сделать?", reply_markup=markup)
-                return
-            elif tasks_with_dates < len(tasks):
-                await callback.message.reply(
-                    f"⚠️ Предупреждение: Только {tasks_with_dates} из {len(tasks)} задач имеют рассчитанные даты. "
-                    f"Остальные задачи будут экспортированы без дат начала и окончания."
-                )
+            buttons = [
+                [InlineKeyboardButton(text="Рассчитать календарный план", callback_data=f"calculate_{project_id}")],
+                [InlineKeyboardButton(text="Отменить экспорт", callback_data=f"view_project_{project_id}")]
+            ]
+            markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+            await callback.message.reply("Что вы хотите сделать?", reply_markup=markup)
+            return
+        elif tasks_with_dates < len(tasks):
+            await callback.message.reply(
+                f"⚠️ Предупреждение: Только {tasks_with_dates} из {len(tasks)} задач имеют рассчитанные даты. "
+                f"Остальные задачи будут экспортированы без дат начала и окончания."
+            )
 
         try:
             import requests
@@ -2023,6 +2068,56 @@ async def confirm_jira_export(callback: CallbackQuery):
             markup = InlineKeyboardMarkup(inline_keyboard=buttons)
             await callback.message.reply("Не удалось создать CSV-файл", reply_markup=markup)
 
+
+# Добавьте эту функцию в main.py:
+
+def create_csv_export(project, tasks):
+    """
+    Создает CSV файл для экспорта задач проекта
+
+    Args:
+        project (dict): Информация о проекте
+        tasks (list): Список задач
+
+    Returns:
+        str: Путь к созданному CSV файлу
+    """
+    import csv
+    import tempfile
+    import os
+
+    # Создаем временный файл
+    temp_dir = tempfile.mkdtemp()
+    safe_project_name = "".join(c if c.isalnum() or c in [' ', '.', '_', '-'] else '_' for c in project['name'])
+    csv_file_path = os.path.join(temp_dir, f"{safe_project_name}_export.csv")
+
+    # Записываем задачи в CSV
+    with open(csv_file_path, 'w', newline='', encoding='utf-8') as csvfile:
+        fieldnames = ['ID', 'Название', 'Длительность', 'Дата начала', 'Дата окончания', 'Исполнитель', 'Должность']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+        writer.writeheader()
+        for task in tasks:
+            # Получаем информацию об исполнителе
+            executor = "Не назначен"
+            if task.get('employee_id'):
+                try:
+                    employee = employee_manager.get_employee(task['employee_id'])
+                    executor = employee['name']
+                except:
+                    executor = f"ID: {task['employee_id']}"
+
+            writer.writerow({
+                'ID': task['id'],
+                'Название': task['name'],
+                'Длительность': task.get('duration', ''),
+                'Дата начала': task.get('start_date', ''),
+                'Дата окончания': task.get('end_date', ''),
+                'Исполнитель': executor,
+                'Должность': task.get('position', '')
+            })
+
+    return csv_file_path
 
 # -----------------------------------------------------------------------------
 # Распределение задач по сотрудникам

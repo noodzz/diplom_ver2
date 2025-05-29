@@ -149,13 +149,20 @@ class NetworkModel:
 
         for task in self.tasks:
             task_id = task['id']
+            task_name = task.get('name', f'Task {task_id}')
+
             deps = self._get_task_dependencies(task_id)
+            print(f"[CPM Debug]   Найденные предшественники: {deps}")
 
             for pred_id in deps:
                 # Проверяем, что предшественник тоже является основной задачей
                 if pred_id in self.task_dict:
                     self.predecessors[task_id].append(pred_id)
                     self.successors[pred_id].append(task_id)
+                    pred_name = self.task_dict[pred_id].get('name', f'Task {pred_id}')
+                    print(f"[CPM Debug]   Добавлена зависимость: '{pred_name}' -> '{task_name}'")
+                else:
+                    print(f"[CPM Debug]   ПРЕДУПРЕЖДЕНИЕ: Предшественник {pred_id} не найден среди основных задач")
 
     def _get_task_dependencies(self, task_id):
         """Получает список предшественников задачи, фильтруя подзадачи"""
@@ -166,24 +173,51 @@ class NetworkModel:
         dependencies = []
         predecessors = task.get('predecessors', [])
 
+        # Обрабатываем разные форматы
         if isinstance(predecessors, list):
-            dependencies = [pred for pred in predecessors if isinstance(pred, (int, str))]
+            dependencies = []
+            for pred in predecessors:
+                if isinstance(pred, (int, str)):
+                    try:
+                        # Преобразуем в int если это строка с числом
+                        pred_id = int(pred) if isinstance(pred, str) and pred.isdigit() else pred
+                        dependencies.append(pred_id)
+                    except ValueError:
+                        pass
         elif isinstance(predecessors, str) and predecessors.strip():
-            try:
-                import json
-                dependencies = json.loads(predecessors)
-            except:
-                dependencies = [
-                    int(pred.strip()) for pred in predecessors.split(',')
-                    if pred.strip().isdigit()
-                ]
+            if predecessors.strip() in ['NULL', 'null', '']:
+                dependencies = []
+            else:
+                try:
+                    # Пытаемся распарсить как JSON
+                    dependencies = json.loads(predecessors)
+                    if not isinstance(dependencies, list):
+                        dependencies = []
+                except json.JSONDecodeError:
+                    # Если не JSON, пробуем разделить по запятым
+                    if ',' in predecessors:
+                        dependencies = []
+                        for pred in predecessors.split(','):
+                            pred = pred.strip()
+                            if pred.isdigit():
+                                dependencies.append(int(pred))
+                    elif predecessors.isdigit():
+                        dependencies = [int(predecessors)]
+                    else:
+                        dependencies = []
 
-        # Фильтруем зависимости, оставляя только основные задачи
         filtered_dependencies = []
         for dep_id in dependencies:
-            if dep_id in self.task_dict:  # Проверяем, что это основная задача
-                filtered_dependencies.append(dep_id)
+            # Преобразуем к int если нужно
+            try:
+                dep_id_int = int(dep_id) if isinstance(dep_id, str) else dep_id
+            except (ValueError, TypeError):
+                continue
 
+            if dep_id_int in self.task_dict:
+                filtered_dependencies.append(dep_id_int)
+
+        print(f"[CPM Debug]   Отфильтрованные зависимости: {filtered_dependencies}")
         return filtered_dependencies
 
     def _has_cycles(self):
@@ -217,19 +251,44 @@ class NetworkModel:
 
         # Топологическая сортировка для правильного порядка обработки
         sorted_tasks = self._topological_sort()
+        print(f"[CPM Debug] Порядок обработки задач: {sorted_tasks}")
 
         for task_id in sorted_tasks:
+            if task_id not in self.task_dict:
+                print(f"[CPM Debug] ПРЕДУПРЕЖДЕНИЕ: Задача {task_id} не найдена в task_dict")
+                continue
             task = self.task_dict[task_id]
             duration = max(1, task.get('duration', 1))
+            task_name = task.get('name', f'Task {task_id}')
 
             # Раннее время начала = максимальное раннее время окончания предшественников
             max_pred_finish = 0
-            for pred_id in self.predecessors.get(task_id, []):
-                if pred_id in early_finish:
-                    max_pred_finish = max(max_pred_finish, early_finish[pred_id])
+            predecessors_list = self.predecessors.get(task_id, [])
+
+            print(f"[CPM Debug] Обработка задачи {task_id} '{task_name}' (длительность: {duration})")
+            print(f"[CPM Debug]   Предшественники: {predecessors_list}")
+
+            if predecessors_list:
+                pred_finishes = []
+                for pred_id in predecessors_list:
+                    if pred_id in early_finish:
+                        pred_finish = early_finish[pred_id]
+                        pred_finishes.append(pred_finish)
+                        pred_name = self.task_dict.get(pred_id, {}).get('name', f'Task {pred_id}')
+                        print(
+                            f"[CPM Debug]     Предшественник '{pred_name}' (ID: {pred_id}) заканчивается в день {pred_finish}")
+                        max_pred_finish = max(max_pred_finish, pred_finish)
+                    else:
+                        print(f"[CPM Debug]     ОШИБКА: Предшественник {pred_id} не имеет времени окончания!")
+
+                print(f"[CPM Debug]   Максимальное время завершения предшественников: {max_pred_finish}")
+            else:
+                print(f"[CPM Debug]   Нет предшественников, начинаем с дня 0")
 
             early_start[task_id] = max_pred_finish
             early_finish[task_id] = early_start[task_id] + duration
+            print(f"[CPM Debug]   Результат: начало={early_start[task_id]}, окончание={early_finish[task_id]}")
+        print(f"[CPM Debug] === КОНЕЦ ПРЯМОГО ПРОХОДА ===")
 
         # Сохраняем для использования в поиске критического пути
         self._early_start_cache = early_start
